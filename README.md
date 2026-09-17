@@ -1,1 +1,107 @@
-# task-manager
+# タスクボード — 人間 × AI エージェント共同カンバン
+
+人間はブラウザ（PC / スマホ）、AI エージェントは CLI (`tm`) で **同じカンバン**を操作するタスク管理ツールです。
+依存パッケージゼロ（Node.js 22 + `node:sqlite`）、1 プロセス、ビルド不要。
+
+- レーンは「**誰にボールがあるか**」: 未着手 / 進行中 / **あなたの判断待ち** / **エージェント待ち** / 保留 / 完了
+- **完了条件**（受け入れ条件）をチェックリストで持ち、AI の `tm done` は全条件チェック済みでないと拒否
+- 付箋（300 文字）・ファイル添付・HTML プレビュー・サブタスク（1 階層）・プロジェクト・優先度・期限
+- **全操作を「誰が・いつ・何を」で記録**し、どの操作も「元に戻す」で取り消し可能（削除はソフトデリート）
+- **エージェント権限ポリシー**: AI はタスク削除・人間の記述の改変・他人の操作の取り消しができない（設定で変更可）
+- SSE でライブ更新、楽観ロックで同時編集を保護、ダーク / ライト、PWA（ホーム画面に追加）
+
+設計の詳細は [docs/DESIGN.md](docs/DESIGN.md)、エージェントに渡す運用手順は [docs/AGENT.md](docs/AGENT.md)。
+
+## セットアップ
+
+```bash
+git clone <this repo> && cd task-manager
+npm start                 # http://127.0.0.1:3000
+npm run seed              # 別ターミナルで。デモデータを投入（空のときだけ）
+npm test                  # node:test
+```
+
+CLI をどこからでも使えるようにする:
+
+```bash
+npm link                  # `tm` コマンドが使えるようになる
+tm --help
+```
+
+### スマホから使う（自宅 LAN）
+
+```bash
+TM_HOST=0.0.0.0 TM_TOKEN=何か長い文字列 npm start
+```
+
+スマホのブラウザで `http://<PC の IP>:3000/` を開き、初回にトークンを入力（端末に保存されます）。
+共有メニューから「ホーム画面に追加」するとアプリのように開けます。
+
+### 環境変数
+
+| 変数 | 既定 | 意味 |
+| --- | --- | --- |
+| `TM_PORT` | `3000` | ポート |
+| `TM_HOST` | `127.0.0.1` | バインド先。LAN 公開は `0.0.0.0` |
+| `TM_TOKEN` | なし | 設定すると API に Bearer トークンが必要になる |
+| `TM_DATA_DIR` | `./data` | SQLite とファイルの保存先（`.gitignore` 済み） |
+| `TM_DB` | `$TM_DATA_DIR/tasks.db` | DB ファイル |
+| `TM_LANES` / `TM_POLICY` | `config/*.json` | レーン定義 / エージェント権限 |
+| `TM_WEBHOOK_URL` | なし | 判断待ちに入った時などに JSON を POST（Slack / Discord の Incoming Webhook 互換） |
+
+CLI 側: `TM_URL`（既定 `http://127.0.0.1:3000`）, `TM_ACTOR`（`agent` / `human`）, `TM_ACTOR_NAME`, `TM_TOKEN`, `TM_FORMAT=json`。
+
+## 使い方（人間）
+
+1. 「タスクを追加」でタイトル・完了条件を書き、「作成後すぐ AI に依頼する」にチェック → **エージェント待ち**へ。
+2. AI が作業し、迷うと **あなたの判断待ち**に「質問」バッジ付きで戻ってきます。カードに質問文がプレビューされます。
+3. 付箋に回答を書いて **「回答して依頼」**。AI が続きをやります。
+4. AI は完了条件をすべて満たすと完了にします（「承認を必要とする」を付けたタスクは「完了報告」として判断待ちに入り、「承認して完了」/「差し戻す」で判断）。
+5. おかしな操作は、詳細の **履歴** タブか上部の **アクティビティ**（「AI の操作のみ」で絞れる）から「元に戻す」。
+
+キーボード: `/` 検索、`n` 新規、`Esc` 閉じる。PC ではカードをドラッグ＆ドロップで移動できます。スマホでは詳細の「状態」で移動します。
+
+## 使い方（AI エージェント）
+
+[docs/AGENT.md](docs/AGENT.md) を CLAUDE.md / AGENTS.md に貼ってください。要点:
+
+```bash
+tm inbox                                  # 依頼されたタスク
+tm show 12                                # 詳細（完了条件・付箋・ファイル・履歴）
+tm start 12                               # 作業開始（作業者を記録）
+tm note 12 "進捗メモ"                      # 付箋
+tm ask 12 "A と B どちらにしますか？"        # → あなたの判断待ち（質問）
+tm check 12 1,2                           # 完了条件にチェック
+tm done 12 "何をどう検証したか"             # → 完了（条件未達なら拒否, exit 3）
+tm attach 12 mockup.html                  # HTML タブでプレビュー可能
+tm activity --by agent --since 24h        # 自分の操作ログ
+tm revert <history_id>                    # 自分の操作を取り消す
+```
+
+出力は `--json` で機械可読。終了コード: 0 成功 / 1 エラー / 2 権限拒否 / 3 完了条件未達 / 4 競合。
+
+## API
+
+`GET /api/board`, `GET|POST /api/tasks`, `GET|PATCH|DELETE /api/tasks/:id`, `POST /api/tasks/:id/{move,start,ask,handoff,hold,done,approve,archive,unarchive,restore}`,
+`/api/tasks/:id/{criteria,notes,files,history}`, `PATCH|DELETE /api/{criteria,notes,files}/:id`, `GET|POST /api/projects`,
+`GET /api/activity`, `POST /api/history/:id/revert`, `GET /api/export`, `GET /api/events` (SSE)。
+
+操作者は `X-Actor: human|agent` と `X-Actor-Name` ヘッダで識別します。更新系は `version` を渡すと不一致で 409。全一覧は [docs/DESIGN.md](docs/DESIGN.md) を参照。
+
+## 構成
+
+```
+bin/tm.js          CLI
+src/server.js      HTTP / SSE / 静的配信 / アップロード
+src/store.js       SQLite・バリデーション・履歴・ロールバック
+src/policy.js      エージェント権限
+config/lanes.json  レーン定義（色・名前・既定で畳むか）
+config/policy.json エージェント権限の既定値
+public/            GUI（ビルドなし）
+scripts/seed.js    デモデータ
+test/              node:test
+```
+
+## バックアップ
+
+`data/` ディレクトリをコピーするか、`tm export > backup.json`。
