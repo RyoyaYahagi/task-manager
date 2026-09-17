@@ -1,5 +1,9 @@
 # Task board — instructions for AI agents
 
+Claude Code を使っているなら、このリポジトリの `.claude/skills/task-board/` がそのままスキルとして読み込まれる
+（他のプロジェクトで使うならディレクトリごと `~/.claude/skills/` にコピーする）。
+その場合この文書は不要。下記は、スキルの仕組みがないエージェントに同じ内容を渡すための貼り付け用。
+
 Paste the section below into your agent's instructions (`CLAUDE.md`, `AGENTS.md`, a system prompt, …).
 The `tm` CLI talks to the board server (`npm start` in this repo). Set `TM_URL` if it is not on `http://127.0.0.1:3000`, and `TM_ACTOR_NAME` to identify yourself (e.g. `claude-code`). `TM_TOKEN` is needed when the server runs with a token.
 

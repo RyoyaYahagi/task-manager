@@ -63,7 +63,9 @@ CLI 側: `TM_URL`（既定 `http://127.0.0.1:3000`）, `TM_ACTOR`（`agent` / `h
 
 ## 使い方（AI エージェント）
 
-[docs/AGENT.md](docs/AGENT.md) を CLAUDE.md / AGENTS.md に貼ってください。要点:
+Claude Code なら **`.claude/skills/task-board/`** がスキルとして読み込まれ、`tm` の使い方・作法・エラー対処を
+エージェントが自分で参照します（他プロジェクトで使うにはディレクトリごと `~/.claude/skills/` にコピー）。
+スキルの仕組みがないエージェントには [docs/AGENT.md](docs/AGENT.md) を CLAUDE.md / AGENTS.md に貼ってください。要点:
 
 ```bash
 tm inbox                                  # 依頼されたタスク
@@ -91,6 +93,7 @@ tm revert <history_id>                    # 自分の操作を取り消す
 ## 構成
 
 ```
+.claude/skills/task-board/   エージェント向けスキル（使い方・CLI / API リファレンス）
 bin/tm.js          CLI
 src/server.js      HTTP / SSE / 静的配信 / アップロード
 src/store.js       SQLite・バリデーション・履歴・ロールバック

@@ -232,6 +232,16 @@ describe('store', () => {
     assert.equal(board.tasks[0].last_note, null);
   });
 
+  test('file mime falls back to the file name when the content type is generic', () => {
+    const t = store.createTask({ title: 'x' }, HUMAN);
+    // curl's default content type for --data-binary says nothing about the file
+    assert.equal(store.addFile(t.id, { name: 'mockup.html', mime: 'application/x-www-form-urlencoded', data: Buffer.from('<h1>x</h1>') }, AGENT).mime, 'text/html');
+    assert.equal(store.addFile(t.id, { name: 'a.png', mime: 'application/octet-stream', data: Buffer.from('x') }, AGENT).mime, 'image/png');
+    assert.equal(store.addFile(t.id, { name: 'no-extension', mime: '', data: Buffer.from('x') }, AGENT).mime, 'application/octet-stream');
+    // an explicit, meaningful content type still wins over the extension
+    assert.equal(store.addFile(t.id, { name: 'data.txt', mime: 'text/csv; charset=utf-8', data: Buffer.from('a,b') }, AGENT).mime, 'text/csv');
+  });
+
   test('files are stored on disk and soft-deleted', () => {
     const t = store.createTask({ title: 'x' }, HUMAN);
     const f = store.addFile(t.id, { name: '../evil/mock.html', mime: '', data: Buffer.from('<h1>x</h1>') }, AGENT);
