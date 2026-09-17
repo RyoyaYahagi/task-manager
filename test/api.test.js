@@ -78,6 +78,9 @@ describe('http api', () => {
     assert.equal(list.length, 2);
     assert.deepEqual(list.map((f) => f.name), ['a.png', 'b.txt']);
 
+    const curlish = await s.api('POST', `/api/tasks/${t.id}/files`, Buffer.from('<h1>hi</h1>'), { raw: true, headers: { 'content-type': 'application/x-www-form-urlencoded', 'x-file-name': 'curl.html' } });
+    assert.equal(curlish.data.mime, 'text/html', 'a generic request content type must not override the file extension');
+
     const get = await fetch(`${s.base}/api/files/${raw.data.id}?inline=1`);
     assert.equal(get.status, 200);
     assert.match(get.headers.get('content-type'), /text\/html/);

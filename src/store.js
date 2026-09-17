@@ -14,6 +14,8 @@ export const TITLE_MAX = 200;
 export const DESC_MAX = 20000;
 export const FILE_MAX = 20 * 1024 * 1024;
 export const PRIORITIES = { 1: '低', 2: '中', 3: '高', 4: '緊急' };
+// Content types that say nothing about the file itself; the file name is more trustworthy.
+const GENERIC_TYPES = new Set(['application/octet-stream', 'binary/octet-stream', 'application/x-www-form-urlencoded', 'multipart/form-data']);
 const PROJECT_COLORS = ['#3b82f6', '#8b5cf6', '#ec4899', '#f97316', '#14b8a6', '#eab308', '#22c55e', '#06b6d4'];
 
 export class StoreError extends Error {
@@ -809,8 +811,10 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
     if (data.length > FILE_MAX) throw new StoreError(413, `file too large (max ${FILE_MAX} bytes)`);
     const safe = safeFileName(name);
     const rel = path.join(String(taskId), `${randomBytes(6).toString('hex')}-${safe}`);
-    mime = String(mime || '').split(';')[0].trim() || guessMime(safe);
-    if (mime === 'application/octet-stream') mime = guessMime(safe);
+    // A raw upload's Content-Type often describes the request encoding rather than the file
+    // (curl defaults to x-www-form-urlencoded), so fall back to the extension in those cases.
+    mime = String(mime || '').split(';')[0].trim().toLowerCase();
+    if (!mime || GENERIC_TYPES.has(mime)) mime = guessMime(safe);
     return mutate(() => {
       getTaskRow(taskId);
       const ts = now();
