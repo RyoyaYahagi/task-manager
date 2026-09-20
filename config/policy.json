@@ -1,0 +1,11 @@
+{
+  "agent": {
+    "can_delete_task": false,
+    "can_purge": false,
+    "can_close_directly": true,
+    "can_edit_human_notes": false,
+    "can_delete_files": false,
+    "can_edit_human_criteria": false,
+    "can_revert_others": false
+  }
+}

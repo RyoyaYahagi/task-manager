@@ -1,0 +1,8 @@
+[
+  { "id": "todo",          "name": "未着手",           "short": "未着手",   "color": "#94a3b8" },
+  { "id": "in_progress",   "name": "進行中",           "short": "進行中",   "color": "#3b82f6" },
+  { "id": "waiting_human", "name": "あなたの判断待ち", "short": "判断待ち", "color": "#f59e0b", "attention": true },
+  { "id": "waiting_agent", "name": "エージェント待ち", "short": "AI待ち",   "color": "#8b5cf6" },
+  { "id": "on_hold",       "name": "保留",             "short": "保留",     "color": "#6b7280", "collapsed": true },
+  { "id": "done",          "name": "完了",             "short": "完了",     "color": "#22c55e", "collapsed": true }
+]
