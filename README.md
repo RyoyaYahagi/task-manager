@@ -37,7 +37,7 @@ TM_HOST=0.0.0.0 TM_TOKEN=何か長い文字列 npm start
 スマホのブラウザで `http://<PC の IP>:3000/` を開き、初回にトークンを入力（端末に保存されます）。
 共有メニューから「ホーム画面に追加」するとアプリのように開けます。
 
-Tailscale Serve で HTTPS を公開すると、サービスワーカーが有効になり、アプリシェルをオフラインでも開けます（タスクデータとライブ更新はオンライン時に取得）。このPCの設定手順は [docs/ALWAYS-ON.md](docs/ALWAYS-ON.md) を参照してください。
+Tailscale Serve で HTTPS を公開すると、サービスワーカーが有効になり、アプリシェルをオフラインでも開けます（タスクデータとライブ更新はオンライン時に取得）。Tailscale のアドレス、常時起動用の systemd 定義、端末固有の運用手順は各端末で管理し、公開リポジトリには追加しないでください。
 
 ### 環境変数
 
@@ -46,12 +46,18 @@ Tailscale Serve で HTTPS を公開すると、サービスワーカーが有効
 | `TM_PORT` | `3000` | ポート |
 | `TM_HOST` | `127.0.0.1` | バインド先。LAN 公開は `0.0.0.0` |
 | `TM_TOKEN` | なし | 設定すると API に Bearer トークンが必要になる |
-| `TM_DATA_DIR` | `./data` | SQLite とファイルの保存先（`.gitignore` 済み） |
+| `TM_DATA_DIR` | `リポジトリ/data` | SQLite と添付ファイルの保存先。リポジトリ内の独自パスを指定する場合は個別に除外する |
 | `TM_DB` | `$TM_DATA_DIR/tasks.db` | DB ファイル |
 | `TM_LANES` / `TM_POLICY` | `config/*.json` | レーン定義 / エージェント権限 |
 | `TM_WEBHOOK_URL` | なし | 判断待ちに入った時などに JSON を POST（Slack / Discord の Incoming Webhook 互換） |
 
 CLI 側: `TM_URL`（既定 `http://127.0.0.1:3000`）, `TM_ACTOR`（`agent` / `human`）, `TM_ACTOR_NAME`, `TM_TOKEN`, `TM_FORMAT=json`。
+
+## ローカルデータとGit管理
+
+タスク本文、添付ファイル、SQLite のサイドカーファイル、ログ、エクスポート、バックアップ、`.env`、秘密鍵、Tailscale の端末固有設定は Git に追加しないでください。これらの代表的なファイルやディレクトリは `.gitignore` で除外しています。
+
+`TM_DATA_DIR` や `TM_DB` をリポジトリ内の別の場所に変更した場合は、その保存先も `.gitignore` に追加してください。`.gitignore` はすでに追跡されているファイルや過去のコミットを削除しないため、コミット前に `git status` と `git diff --cached` で確認します。
 
 ## 使い方（人間）
 
@@ -109,4 +115,4 @@ test/              node:test
 
 ## バックアップ
 
-`data/` ディレクトリをコピーするか、`tm export > backup.json`。
+`data/` ディレクトリをコピーするか、`tm export > backup.json`。`backup.json`、`backups/`、`exports/` は `.gitignore` 対象ですが、バックアップ自体はリポジトリ外にも保管してください。
