@@ -693,6 +693,16 @@ function connect() {
   for (const t of ['task.created', 'task.updated', 'task.deleted', 'task.purged', 'note.created', 'note.updated', 'note.deleted', 'criteria.created', 'criteria.updated', 'criteria.deleted', 'file.created', 'file.updated', 'file.deleted', 'project.created', 'project.updated']) es.addEventListener(t, onEvent);
 }
 
+// The board still needs a live connection for API/SSE data, but the app shell
+// can be opened from the home screen while offline. The service worker never
+// caches API responses or the event stream.
+function registerServiceWorker() {
+  if (!('serviceWorker' in navigator)) return;
+  navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch((err) => {
+    console.warn('service worker registration failed:', err);
+  });
+}
+
 // ---------- keyboard ----------
 document.addEventListener('keydown', (e) => {
   const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName) || document.activeElement?.isContentEditable;
@@ -711,6 +721,7 @@ window.addEventListener('hashchange', () => { const id = Number(location.hash.sl
 
 // ---------- init ----------
 (async () => {
+  registerServiceWorker();
   applyTheme();
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme);
   try { state.meta = await api('GET', '/api/meta'); } catch (e) { handleError(e); }

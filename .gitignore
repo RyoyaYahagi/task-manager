@@ -3,5 +3,47 @@ data/
 *.db
 *.db-wal
 *.db-shm
+*.db-journal
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3-journal
 .DS_Store
 /tmp/
+
+# Machine-specific deployment details (Tailscale addresses and local paths)
+/docs/ALWAYS-ON.md
+/deploy/task-manager.service
+
+# Local environment and credentials; commit only sanitized examples
+.env
+.env.*
+!.env.example
+!.env.*.example
+!.env.sample
+!.env.template
+.envrc
+*.key
+*.pem
+*.p12
+*.pfx
+*.keystore
+id_rsa
+id_ed25519
+/secrets/
+/credentials.json
+/.tailscale/
+/.claude/settings.local.json
+
+# Runtime output and local backups may contain task data or credentials
+*.log
+/logs/
+/backups/
+/exports/
+/backup.json
+*.bak
+*.backup
