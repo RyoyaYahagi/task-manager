@@ -22,6 +22,7 @@ data/
 # Local environment and credentials; commit only sanitized examples
 .env
 .env.*
+.env.local
 !.env.example
 !.env.*.example
 !.env.sample
