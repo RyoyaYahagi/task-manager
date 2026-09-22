@@ -9,12 +9,12 @@ const PRI_MARK = { 1: '↓', 3: '!', 4: '‼' };
 const ASSIGNEE_LABEL = { human: '人間', agent: 'AI', both: '両方' };
 const ACTION_LABEL = {
   'task.create': 'タスクを作成', 'task.update': '更新', 'task.move': 'レーン移動', 'task.reorder': '並び替え', 'task.start': '作業開始', 'task.ask': '質問して判断待ちへ',
-  'task.handoff': 'エージェントに依頼', 'task.hold': '保留', 'task.done': '完了報告', 'task.approve': '承認して完了', 'task.archive': 'アーカイブ', 'task.unarchive': 'アーカイブ解除',
+  'task.handoff': 'エージェントに依頼', 'task.hold': '保留', 'task.done': '完了報告', 'task.approve': '承認して完了', 'task.archive': 'アーカイブ', 'task.unarchive': 'アーカイブ解除', 'task.auto_classify': 'JEV が自動分類',
   'task.delete': '削除', 'task.restore': '復元', 'criteria.add': '完了条件を追加', 'criteria.edit': '完了条件を編集', 'criteria.check': '完了条件をチェック', 'criteria.delete': '完了条件を削除',
   'note.add': '付箋を追加', 'note.edit': '付箋を編集', 'note.delete': '付箋を削除', 'file.add': 'ファイルを添付', 'file.delete': 'ファイルを削除',
   'project.create': 'プロジェクトを作成', 'project.update': 'プロジェクトを更新', revert: '元に戻す', purge: '完全削除',
 };
-const FIELD_LABEL = { title: 'タイトル', description: '説明', status: '状態', waiting_reason: '理由', assignee: '担当', priority: '優先度', due: '期限', project_id: 'プロジェクト', parent_id: '親タスク', tags: 'タグ', worker: '作業者', needs_review: '要承認', position: '位置', archived_at: 'アーカイブ', deleted_at: '削除', body: '本文', text: '内容', done: 'チェック', kind: '種別', name: '名前' };
+const FIELD_LABEL = { title: 'タイトル', description: '説明', status: '状態', waiting_reason: '理由', assignee: '担当', priority: '優先度', due: '期限', project_id: 'プロジェクト', parent_id: '親タスク', tags: 'タグ', classification_suggestions: '分類候補', worker: '作業者', needs_review: '要承認', position: '位置', archived_at: 'アーカイブ', deleted_at: '削除', body: '本文', text: '内容', done: 'チェック', kind: '種別', name: '名前' };
 
 const state = {
   meta: null, lanes: [], board: null, tasks: [], projects: [], tags: [],
@@ -175,12 +175,17 @@ function renderProjectOptions() {
   const sel = $('#projectSelect');
   const cur = state.filter.project;
   sel.innerHTML = '<option value="">すべてのプロジェクト</option>' + state.projects.map((p) => `<option value="${p.id}" ${String(p.id) === String(cur) ? 'selected' : ''}>${esc(p.name)}</option>`).join('');
-  $('#projectList').innerHTML = state.projects.map((p) => `<option value="${esc(p.name)}">`).join('');
+  const configured = (state.meta?.classification?.projects || []).map((p) => p.name);
+  const names = [...new Set([...state.projects.map((p) => p.name), ...configured])];
+  $('#projectList').innerHTML = names.map((name) => `<option value="${esc(name)}">`).join('');
 }
 function renderTagOptions() {
   const sel = $('#tagFilter');
   const cur = state.filter.tag;
   sel.innerHTML = '<option value="">タグ: すべて</option>' + state.tags.map((t) => `<option value="${esc(t)}" ${t === cur ? 'selected' : ''}>${esc(t)}</option>`).join('');
+  const configured = (state.meta?.classification?.tags || []).map((t) => t.name);
+  const names = [...new Set([...state.tags, ...configured])];
+  $('#tagList').innerHTML = names.map((name) => `<option value="${esc(name)}">`).join('');
 }
 
 // board events
@@ -304,6 +309,12 @@ function renderDetail() {
   const noteHtml = renderNotes(t);
   const tabs = [['notes', '付箋', t.notes.length], ['files', 'ファイル', t.files.length], ['html', 'HTML', t.files.filter((f) => f.mime === 'text/html').length], ['history', '履歴', t.history.length]];
   const body = { notes: noteHtml, files: renderFiles(t), html: renderHtmlTab(t), history: renderHistory(t.history, { compact: true }) }[state.ui.tab];
+  const suggestions = t.classification_suggestions || [];
+  const suggestionHtml = suggestions.length ? `<div class="classification-suggestion-box">
+        <div class="section-title">JEVの分類候補 <span class="count">${suggestions.length}件</span></div>
+        <div class="classification-suggestion-list">${suggestions.map((s) => `<div class="classification-suggestion"><span class="tag">${esc(s.kind === 'project' ? 'プロジェクト' : 'タグ')}</span><b>${esc(s.name)}</b><span class="muted">確信度 ${Math.round(Number(s.confidence) * 100)}%</span></div>`).join('')}</div>
+        <p class="muted classification-suggestion-help">未登録プロジェクトは自動作成していません。採用する場合はプロジェクトを作成・選択してから「JEVで再分類」を実行してください。</p>
+      </div>` : '';
   el.innerHTML = `
     <div class="detail-head">
       <button class="btn icon mobile-only" data-act="close" aria-label="戻る">${icon('back')}</button>
@@ -326,11 +337,12 @@ function renderDetail() {
         <label class="field"><span>優先度</span><select class="select" data-field="priority">${[4, 3, 2, 1].map((p) => `<option value="${p}" ${p === t.priority ? 'selected' : ''}>${PRI_LABEL[p]}</option>`).join('')}</select></label>
         <label class="field"><span>期限</span><input class="input" type="date" data-field="due" value="${esc(t.due || '')}"></label>
         <label class="field"><span>プロジェクト</span><input class="input" list="projectList" data-field="project" value="${esc(t.project?.name || '')}" placeholder="なし"></label>
-        <label class="field"><span>タグ</span><input class="input" data-field="tags" value="${esc(t.tags.join(', '))}" placeholder="カンマ区切り"></label>
+        <label class="field"><span>タグ</span><input class="input" list="tagList" data-field="tags" value="${esc(t.tags.join(', '))}" placeholder="カンマ区切り"></label>
         <div class="field"><span>作業者</span><div class="static">${t.worker ? `${actorIcon(t.worker === 'human' ? 'human' : 'agent')} ${esc(t.worker)}` : '<span class="muted">—</span>'}</div></div>
         <div class="field"><span>更新</span><div class="static" title="${esc(t.updated_at)}">${fmtDate(t.updated_at)} <span class="muted">(${rel(t.updated_at)})</span></div></div>
         <label class="field-check"><input type="checkbox" data-field="needs_review" ${t.needs_review ? 'checked' : ''}><span>AI の完了報告に人間の承認を必要とする</span></label>
       </div>
+      ${suggestionHtml}
       <div>
         <div class="section-title">説明 <button class="btn sm link right" data-act="edit-desc">${icon('edit')}編集</button></div>
         <div class="desc md" data-act="edit-desc">${t.description ? renderMarkdown(t.description) : ''}</div>
@@ -370,6 +382,7 @@ function renderActions(t) {
       <button data-act="todo">未着手に戻す</button>
       ${t.archived_at ? '<button data-act="unarchive">アーカイブを解除</button>' : '<button data-act="archive">アーカイブ</button>'}
       <button data-act="add-sub">サブタスクを作成</button>
+      <button data-act="classify">JEVで再分類</button>
       <button data-act="delete" class="danger">削除</button>
     </div></div>`;
   if (t.status === 'waiting_human' && t.waiting_reason === 'review') {
@@ -439,6 +452,7 @@ function describeChanges(h) {
         if (k === 'done') return v ? 'チェック' : '未チェック';
         if (k === 'needs_review') return v ? 'はい' : 'いいえ';
         if (k === 'deleted_at' || k === 'archived_at') return v ? 'あり' : 'なし';
+        if (k === 'classification_suggestions') return (v || []).map((suggestion) => suggestion.name).join('、') || '（なし）';
         if (Array.isArray(v)) return v.join(', ') || '（なし）';
         const s = String(v); return s.length > 60 ? s.slice(0, 60) + '…' : s;
       };
@@ -513,6 +527,15 @@ async function act(name, target) {
       case 'html-select': state.htmlFile = Number(target.value); renderDetail(); break;
       case 'revert': { const hid = Number(target.dataset.id); await api('POST', `/api/history/${hid}/revert`, {}); toast('元に戻しました', 'ok'); scheduleDetail(); loadBoard(); break; }
       case 'menu': target.closest('.menu').classList.toggle('open'); break;
+      case 'classify': {
+        const result = await api('POST', `/api/tasks/${id}/classify`, {});
+        if (result.unavailable) toast('JEV API キーが未設定です', 'error');
+        else if (result.suggestions?.length) toast(`分類候補: ${result.suggestions.map((x) => x.name).join('、')}`);
+        else if (result.changed) toast('JEVで再分類しました', 'ok');
+        else toast('反映する分類はありません');
+        scheduleDetail(); loadBoard();
+        break;
+      }
       case 'handoff': case 'answer': {
         if (name === 'answer' && !draft) { toast('付箋に回答を書いてから押してください', 'error'); ni?.focus(); return; }
         if (name === 'handoff' && !t.criteria.length && !confirm('完了条件が未設定です。このまま AI に依頼しますか？')) return;
@@ -645,11 +668,54 @@ $$('[data-close]').forEach((b) => { b.onclick = () => b.closest('dialog').close(
 
 // ---------- legend ----------
 const LANE_HELP = { todo: 'まだ誰も着手していない', in_progress: '人間または AI が作業中', waiting_human: 'AI があなたの回答・確認を待っている', waiting_agent: 'AI に依頼済み。AI の受信箱', on_hold: 'いったん止めている', done: '終わった' };
+function renderClassificationSettings() {
+  const select = $('#classificationMode');
+  if (!select) return;
+  const classification = state.meta?.classification || {};
+  select.value = classification.mode || 'off';
+  const threshold = classification.threshold == null ? null : Math.round(classification.threshold * 100);
+  const info = $('#classificationInfo');
+  if (info) {
+    if (!classification.available) info.textContent = 'JEV の API キーが未設定です。キーを設定するまで分類は実行されません。';
+    else if (classification.mode === 'high_confidence') info.textContent = `新規作成時とタイトル・説明・完了条件の更新時に、確信度 ${threshold ?? 85}% 以上の判定だけ反映します。手動の再分類も実行できます。`;
+    else info.textContent = '現在はオフです。既存タスクや手動更新には自動分類を適用しません。';
+  }
+  const candidates = $('#classificationCandidates');
+  if (!candidates) return;
+  const projects = (classification.projects || []).map((p) => `${esc(p.name)}${p.available ? '' : '（未作成）'}`).join('、') || '未設定';
+  const tags = (classification.tags || []).map((t) => esc(t.name)).join('、') || '未設定';
+  candidates.innerHTML = `<div><b>プロジェクト候補:</b> ${projects}</div><div><b>タグ候補:</b> ${tags}</div>`;
+}
 $('#legendBtn').onclick = () => {
   $('#nameInput').value = LS.get('tm.name', '');
   $('#legendLanes').innerHTML = state.lanes.map((l) => `<div class="legend-lane"><span class="lane-bar" style="background:${esc(l.color)}"></span><b>${esc(l.name)}</b><span class="d">${esc(LANE_HELP[l.id] || '')}</span></div>`).join('');
+  renderClassificationSettings();
   $('#legendDialog').showModal();
 };
+$('#classificationMode').addEventListener('change', async (e) => {
+  const previous = state.meta?.classification?.mode || 'off';
+  try {
+    const settings = await api('PATCH', '/api/settings', { classification_mode: e.target.value });
+    state.meta = state.meta || {};
+    state.meta.classification = { ...(state.meta.classification || {}), mode: settings.classification_mode };
+    renderClassificationSettings();
+    toast(settings.classification_mode === 'high_confidence' ? '高確信度の自動分類をオンにしました' : '自動分類をオフにしました', 'ok');
+  } catch (err) {
+    e.target.value = previous;
+    handleError(err);
+  }
+});
+$('#reclassifyAll').addEventListener('click', async () => {
+  if (!confirm('未アーカイブの既存タスクをすべて JEV で再分類しますか？')) return;
+  try {
+    const result = await api('POST', '/api/classification/reclassify', {});
+    const names = [...new Set((result.suggestions || []).map((x) => x.name))];
+    if (result.unavailable) toast('JEV API キーが未設定です', 'error');
+    else if (names.length) toast(`${result.changed}件を更新。未作成候補: ${names.join('、')}`);
+    else toast(`${result.changed}件を再分類しました`, 'ok');
+    loadBoard(); if (state.selectedId) refreshDetail();
+  } catch (err) { handleError(err); }
+});
 
 // ---------- activity ----------
 async function loadActivity() {
@@ -685,12 +751,17 @@ function connect() {
   const onEvent = (e) => {
     let ev = {};
     try { ev = JSON.parse(e.data); } catch { /* ignore */ }
+    if (ev.type === 'settings.updated' && ev.settings) {
+      state.meta = state.meta || {};
+      state.meta.classification = { ...(state.meta.classification || {}), mode: ev.settings.classification_mode };
+      renderClassificationSettings();
+    }
     scheduleBoard();
     if (state.selectedId && (ev.task_id === state.selectedId || ev.task?.parent_id === state.selectedId || state.task?.parent_id === ev.task_id)) scheduleDetail();
     if (ev.type === 'task.updated' && ev.action === 'task.ask' && ev.task) toast(`#${ev.task.id} AI から質問があります`);
     if (ev.type === 'task.updated' && ev.action === 'task.done' && ev.task) toast(`#${ev.task.id} ${ev.task.status === 'done' ? 'AI が完了しました' : 'AI の完了報告が届きました'}`, 'ok');
   };
-  for (const t of ['task.created', 'task.updated', 'task.deleted', 'task.purged', 'note.created', 'note.updated', 'note.deleted', 'criteria.created', 'criteria.updated', 'criteria.deleted', 'file.created', 'file.updated', 'file.deleted', 'project.created', 'project.updated']) es.addEventListener(t, onEvent);
+  for (const t of ['task.created', 'task.updated', 'task.deleted', 'task.purged', 'note.created', 'note.updated', 'note.deleted', 'criteria.created', 'criteria.updated', 'criteria.deleted', 'file.created', 'file.updated', 'file.deleted', 'project.created', 'project.updated', 'settings.updated']) es.addEventListener(t, onEvent);
 }
 
 // The board still needs a live connection for API/SSE data, but the app shell

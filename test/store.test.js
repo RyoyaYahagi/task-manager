@@ -31,6 +31,28 @@ describe('store', () => {
     assert.throws(() => store.addNote(t.id, 'a'.repeat(301), HUMAN), /max 300/);
   });
 
+  test('classification mode defaults off, persists in the store, and emits an event', () => {
+    assert.deepEqual(store.getSettings(), { classification_mode: 'off' });
+    assert.deepEqual(store.updateSettings({ classification_mode: 'high_confidence' }, HUMAN), { classification_mode: 'high_confidence' });
+    assert.equal(store.getSettings().classification_mode, 'high_confidence');
+    assert.ok(events.some((e) => e.type === 'settings.updated' && e.settings.classification_mode === 'high_confidence'));
+    assert.throws(() => store.updateSettings({ classification_mode: 'always' }, HUMAN), /classification_mode/);
+  });
+
+  test('classification suggestions are stored on the task and are revertable', () => {
+    const t = store.createTask({ title: '候補付きタスク' }, HUMAN);
+    const suggestions = [{ kind: 'project', key: 'research', name: '研究・調査', confidence: 0.96 }];
+    const updated = store.updateTask(t.id, {}, AGENT, {
+      version: t.version,
+      action: 'task.auto_classify',
+      classificationSuggestions: suggestions,
+    });
+    assert.deepEqual(updated.classification_suggestions, suggestions);
+    assert.deepEqual(store.getTask(t.id).classification_suggestions, suggestions);
+    const reverted = store.revert(store.getTask(t.id).history[0].id, AGENT);
+    assert.deepEqual(reverted.task.classification_suggestions, []);
+  });
+
   test('optimistic locking rejects stale versions', () => {
     const t = store.createTask({ title: 'x' }, HUMAN);
     store.updateTask(t.id, { title: 'y' }, HUMAN, { version: 1 });

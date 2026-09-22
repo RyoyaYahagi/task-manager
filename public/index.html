@@ -112,7 +112,7 @@
       <label>優先度 <select name="priority"><option value="2">中</option><option value="1">低</option><option value="3">高</option><option value="4">緊急</option></select></label>
       <label>期限 <input name="due" type="date"></label>
       <label>プロジェクト <input name="project" list="projectList" placeholder="なし / 新規名で作成" autocomplete="off"><datalist id="projectList"></datalist></label>
-      <label>タグ <input name="tags" placeholder="カンマ区切り" autocomplete="off"></label>
+      <label>タグ <input name="tags" list="tagList" placeholder="カンマ区切り" autocomplete="off"><datalist id="tagList"></datalist></label>
     </div>
     <label>完了条件（1 行 1 件）<textarea name="criteria" rows="3" placeholder="例:&#10;GET /api/health が 200 を返す&#10;テストが通る"></textarea></label>
     <label class="toggle"><input type="checkbox" name="needs_review"><span>AI の完了報告に承認を必要とする</span></label>
@@ -138,6 +138,16 @@
     </ul>
     <h3>あなたの表示名</h3>
     <label class="muted" style="display:flex;flex-direction:column;gap:4px;font-size:12.5px">付箋や履歴に記録される名前（空なら「human」）<input id="nameInput" class="input" placeholder="例: ryoya" maxlength="60" autocomplete="off"></label>
+    <h3>自動分類（JEV）</h3>
+    <label class="muted" style="display:flex;flex-direction:column;gap:4px;font-size:12.5px">新しいタスクの分類方法
+      <select id="classificationMode" class="select">
+        <option value="off">オフ</option>
+        <option value="high_confidence">高確信度のみ自動反映</option>
+      </select>
+    </label>
+    <p id="classificationInfo" class="muted classification-info"></p>
+    <div id="classificationCandidates" class="classification-candidates"></div>
+    <div class="classification-actions"><button type="button" class="btn" id="reclassifyAll">既存タスクを再分類</button><span class="muted">未作成プロジェクトは候補として返し、自動作成しません。</span></div>
     <h3>使い方</h3>
     <ol class="legend-list">
       <li>タスクを作り、完了条件を書いて「エージェントに依頼」を押す（→ エージェント待ち）。</li>

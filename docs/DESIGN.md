@@ -169,6 +169,15 @@ AI の「完了」を曖昧にしないため、タスクごとに **完了条�
 - ヘッダに **プロジェクト切替**（すべて / 個別）。ボードは 1 枚で、フィルタで絞る。
 - CLI: `tm projects`, `tm project add <name> [--color]`, タスクには `--project <name>` で指定。
 
+### 5.5 JEV 自動分類
+
+- `config/classification.json` に、JEV が選べるプロジェクト候補・タグ候補・閾値を定義する。モデルが自由な名前を返しても、候補キーに一致しない値は反映しない。
+- GUI の設定は `settings.classification_mode` に保存し、`off`（既定）または `high_confidence` を選べる。
+- `high_confidence` のときだけ、新規タスク作成イベントを契機に JEV を呼び、既定の確信度 0.85 以上のプロジェクト / タグを反映する。
+- 既存のプロジェクトやタグを上書き・削除せず、同時編集でバージョン競合が起きた場合は反映を中止する。
+- 自動反映は `task.auto_classify` と `jev-auto-classifier` として通常のタスク履歴に残る。JEV の入力は初期実装ではタイトル・説明・完了条件などに限定し、付箋本文と添付ファイルは送らない。
+- 未作成プロジェクトは自動作成せず、再分類 API の `suggestions` とタスクの `classification_suggestions` に候補として保存する。既存タスクの一括再分類と、個別タスクの明示的な再分類を用意する。候補は次の成功した再分類で置き換え、候補が無ければクリアする。
+
 ## 6. 監査ログとロールバック
 
 「誰が・いつ・何を」を全操作で記録し、AI の誤操作を追跡して取り消せるようにする。
@@ -234,6 +243,9 @@ AI の「完了」を曖昧にしないため、タスクごとに **完了条�
 | GET / DELETE | `/api/files/:id` | ダウンロード（`?inline=1` で HTML プレビュー用）/ 削除 |
 | GET / POST | `/api/projects` | プロジェクト一覧 / 作成 |
 | PATCH / DELETE | `/api/projects/:id` | 更新 / アーカイブ |
+| GET / PATCH | `/api/settings` | 自動分類モードの取得 / 更新 |
+| POST | `/api/tasks/:id/classify` | 人間が指定したタスクを JEV で再分類 |
+| POST | `/api/classification/reclassify` | 既存タスクを一括再分類 |
 | GET | `/api/tasks/:id/history` | タスク履歴 |
 | GET | `/api/activity` | 全体ログ。`actor, since, task, limit` |
 | POST | `/api/history/:id/revert` | 取り消し |

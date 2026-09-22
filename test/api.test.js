@@ -18,6 +18,23 @@ describe('http api', () => {
     assert.notEqual(nope.status, 200);
   });
 
+  test('classification setting is selectable over HTTP', async () => {
+    assert.equal((await s.api('GET', '/api/settings')).data.classification_mode, 'off');
+    const changed = await s.api('PATCH', '/api/settings', { classification_mode: 'high_confidence' });
+    assert.equal(changed.status, 200);
+    assert.equal(changed.data.classification_mode, 'high_confidence');
+    assert.equal((await s.api('GET', '/api/meta')).data.classification.mode, 'high_confidence');
+    assert.equal((await s.api('PATCH', '/api/settings', { classification_mode: 'invalid' })).status, 400);
+    assert.equal((await s.api('PATCH', '/api/settings', { classification_mode: 'off' }, { actor: AGENT })).status, 403);
+  });
+
+  test('classification endpoints require a configured classifier and human actor', async () => {
+    const task = (await s.api('POST', '/api/tasks', { title: 'classification endpoint' })).data;
+    assert.equal((await s.api('POST', `/api/tasks/${task.id}/classify`, {}, { actor: AGENT })).status, 403);
+    assert.equal((await s.api('POST', `/api/tasks/${task.id}/classify`, {})).status, 503);
+    assert.equal((await s.api('POST', '/api/classification/reclassify', {})).status, 503);
+  });
+
   test('task lifecycle over http with actor headers', async () => {
     const c = await s.api('POST', '/api/tasks', { title: 'api task', criteria: ['ok'], project: 'proj' });
     assert.equal(c.status, 201);

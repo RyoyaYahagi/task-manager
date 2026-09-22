@@ -312,6 +312,13 @@ textarea.input { min-height: 72px; resize: vertical; width: 100%; }
 .legend-lane { display: flex; gap: 8px; align-items: center; }
 .legend-lane .lane-bar { height: 16px; }
 .legend-lane .d { color: var(--muted); font-size: 12.5px; }
+.classification-info { margin: 0; font-size: 12px; line-height: 1.5; }
+.classification-candidates { font-size: 12px; line-height: 1.55; color: var(--muted); background: var(--panel-2); border-radius: 8px; padding: 7px 9px; }
+.classification-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 11.5px; }
+.classification-suggestion-box { padding: 10px 12px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; }
+.classification-suggestion-list { display: flex; flex-direction: column; gap: 5px; }
+.classification-suggestion { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; font-size: 13px; }
+.classification-suggestion-help { margin: 7px 0 0; font-size: 11.5px; line-height: 1.45; }
 .legend-list { margin: 0; padding-left: 18px; font-size: 13px; display: flex; flex-direction: column; gap: 4px; }
 .activity-filters { display: flex; gap: 8px; flex-wrap: wrap; }
 #activityList { max-height: 60dvh; overflow: auto; }

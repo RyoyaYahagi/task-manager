@@ -5,6 +5,8 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createStore, StoreError, guessMime, FILE_MAX, NOTE_MAX } from './store.js';
 import { loadLanes, loadPolicy } from './lanes.js';
+import { createTaskClassifier, loadClassification } from './classifier.js';
+import { loadLocalEnv } from './env.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(here, '..', 'public');
@@ -15,8 +17,16 @@ class HttpError extends Error {
 }
 
 /** Build an http.Server (not listening). */
-export function createApp({ store, token = null, publicDir = PUBLIC_DIR, webhookUrl = null, logger = console } = {}) {
+export function createApp({ store, token = null, publicDir = PUBLIC_DIR, webhookUrl = null, logger = console, classifier = null } = {}) {
   const clients = new Set();
+
+  function classificationMeta() {
+    if (classifier?.info) return classifier.info();
+    return {
+      provider: 'jev', model: null, mode: store.getSettings().classification_mode, threshold: null, available: false,
+      create_missing_projects: false, projects: [], tags: [],
+    };
+  }
 
   function broadcast(ev) {
     const line = `event: ${ev.type}\ndata: ${JSON.stringify(ev)}\n\n`;
@@ -46,12 +56,19 @@ export function createApp({ store, token = null, publicDir = PUBLIC_DIR, webhook
 
   route('GET', '/api/health', () => ({ ok: true, time: new Date().toISOString() }));
   route('GET', '/api/lanes', () => store.lanes);
-  route('GET', '/api/meta', () => ({ lanes: store.lanes, policy: store.policy, note_max: NOTE_MAX, file_max: FILE_MAX, auth: !!token }));
+  route('GET', '/api/meta', () => ({ lanes: store.lanes, policy: store.policy, note_max: NOTE_MAX, file_max: FILE_MAX, auth: !!token, classification: classificationMeta() }));
+  route('GET', '/api/settings', () => store.getSettings());
+  route('PATCH', '/api/settings', (c) => store.updateSettings(c.body, c.actor));
   route('GET', '/api/board', (c) => store.board(taskFilter(c.query)));
   route('GET', '/api/tasks', (c) => store.listTasks(taskFilter(c.query)));
   route('POST', '/api/tasks', (c) => [201, store.createTask(c.body, c.actor)]);
   route('GET', '/api/tasks/:id', (c) => store.getTask(idOf(c.params.id), { includeDeleted: bool(c.query.include_deleted) }));
   route('PATCH', '/api/tasks/:id', (c) => store.updateTask(idOf(c.params.id), c.body, c.actor));
+  route('POST', '/api/tasks/:id/classify', async (c) => {
+    requireHuman(c.actor);
+    if (!classifier) throw new HttpError(503, 'JEV classifier is not configured', { code: 'classifier_unavailable' });
+    return (await classifier.classifyNow(idOf(c.params.id), { force: true, reclassify: true })) || { task: store.getTask(idOf(c.params.id)), changed: false };
+  });
   route('DELETE', '/api/tasks/:id', (c) => store.deleteTask(idOf(c.params.id), c.actor));
   route('POST', '/api/tasks/:id/move', (c) => store.moveTask(idOf(c.params.id), c.body, c.actor));
   route('POST', '/api/tasks/:id/start', (c) => store.startTask(idOf(c.params.id), c.actor, { force: bool(c.body.force), version: c.body.version }));
@@ -101,6 +118,11 @@ export function createApp({ store, token = null, publicDir = PUBLIC_DIR, webhook
   route('POST', '/api/projects', (c) => [201, store.createProject(c.body, c.actor)]);
   route('PATCH', '/api/projects/:id', (c) => store.updateProject(idOf(c.params.id), c.body, c.actor));
   route('DELETE', '/api/projects/:id', (c) => store.updateProject(idOf(c.params.id), { archived: true }, c.actor));
+  route('POST', '/api/classification/reclassify', async (c) => {
+    requireHuman(c.actor);
+    if (!classifier) throw new HttpError(503, 'JEV classifier is not configured', { code: 'classifier_unavailable' });
+    return classifier.reclassifyAll({ includeArchived: bool(c.body.include_archived) });
+  });
   route('GET', '/api/tasks/:id/history', (c) => store.listHistory(idOf(c.params.id), { limit: Number(c.query.limit) || 200 }));
   route('GET', '/api/activity', (c) => store.activity({ actor: c.query.actor, actor_name: c.query.actor_name, since: parseSince(c.query.since), task: c.query.task, limit: c.query.limit, before: c.query.before }));
   route('POST', '/api/history/:id/revert', (c) => store.revert(idOf(c.params.id), c.actor, { force: bool(c.body.force) }));
@@ -122,6 +144,10 @@ export function createApp({ store, token = null, publicDir = PUBLIC_DIR, webhook
       parent: q.parent, topLevel: bool(q.top_level), overdue: bool(q.overdue),
       includeArchived: bool(q.include_archived), includeDeleted: bool(q.include_deleted),
     };
+  }
+
+  function requireHuman(actor) {
+    if (actor.kind !== 'human') throw new HttpError(403, 'only humans can request classification', { code: 'human_only' });
   }
 
   function parseSince(v) {
@@ -267,14 +293,26 @@ function safeEq(a, b) {
   return r === 0;
 }
 
-export function startFromEnv(env = process.env) {
+export function startFromEnv(env) {
+  if (env === undefined) {
+    loadLocalEnv();
+    env = process.env;
+  }
   const dataDir = env.TM_DATA_DIR || path.join(here, '..', 'data');
   const dbFile = env.TM_DB || path.join(dataDir, 'tasks.db');
   const lanes = loadLanes(env.TM_LANES);
   const policy = loadPolicy(env.TM_POLICY);
   const store = createStore({ file: dbFile, lanes, policy, filesDir: path.join(dataDir, 'files') });
+  const classifier = createTaskClassifier({
+    store,
+    config: loadClassification(env.TM_CLASSIFICATION_CONFIG),
+    apiKey: env.TM_JEV_API_KEY || env.TYPESAFE_API_KEY || '',
+    baseUrl: env.TM_JEV_BASE_URL,
+    model: env.TM_JEV_MODEL,
+    timeoutMs: env.TM_JEV_TIMEOUT_MS,
+  });
   const token = env.TM_TOKEN || null;
-  const server = createApp({ store, token, webhookUrl: env.TM_WEBHOOK_URL || null });
+  const server = createApp({ store, token, webhookUrl: env.TM_WEBHOOK_URL || null, classifier });
   const port = Number(env.TM_PORT || 3000);
   const host = env.TM_HOST || '127.0.0.1';
   server.listen(port, host, () => {
@@ -282,10 +320,10 @@ export function startFromEnv(env = process.env) {
     console.log(`  db: ${dbFile}`);
     console.log(`  auth: ${token ? 'token required' : 'none (local only)'}${host === '127.0.0.1' ? '   (set TM_HOST=0.0.0.0 to allow phones on your LAN, and TM_TOKEN=... to protect it)' : ''}`);
   });
-  const shutdown = () => { server.close(); store.close(); process.exit(0); };
+  const shutdown = () => { classifier.close(); server.close(); store.close(); process.exit(0); };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
-  return { server, store };
+  return { server, store, classifier };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

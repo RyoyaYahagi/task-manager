@@ -14,6 +14,8 @@ export const TITLE_MAX = 200;
 export const DESC_MAX = 20000;
 export const FILE_MAX = 20 * 1024 * 1024;
 export const PRIORITIES = { 1: '低', 2: '中', 3: '高', 4: '緊急' };
+export const CLASSIFICATION_MODES = ['off', 'high_confidence'];
+export const DEFAULT_SETTINGS = { classification_mode: 'off' };
 // Content types that say nothing about the file itself; the file name is more trustworthy.
 const GENERIC_TYPES = new Set(['application/octet-stream', 'binary/octet-stream', 'application/x-www-form-urlencoded', 'multipart/form-data']);
 const PROJECT_COLORS = ['#3b82f6', '#8b5cf6', '#ec4899', '#f97316', '#14b8a6', '#eab308', '#22c55e', '#06b6d4'];
@@ -49,6 +51,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   project_id INTEGER REFERENCES projects(id),
   parent_id INTEGER REFERENCES tasks(id),
   tags TEXT NOT NULL DEFAULT '[]',
+  classification_suggestions TEXT NOT NULL DEFAULT '[]',
   worker TEXT NOT NULL DEFAULT '',
   needs_review INTEGER NOT NULL DEFAULT 0,
   position REAL NOT NULL DEFAULT 0,
@@ -117,13 +120,18 @@ CREATE TABLE IF NOT EXISTS history (
 );
 CREATE INDEX IF NOT EXISTS history_task ON history(task_id, id);
 CREATE INDEX IF NOT EXISTS history_actor ON history(actor, id);
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 `;
 
 const TABLE = { task: 'tasks', criteria: 'criteria', note: 'notes', file: 'files', project: 'projects' };
-const JSON_FIELDS = new Set(['tags']);
+const JSON_FIELDS = new Set(['tags', 'classification_suggestions']);
 // Fields a revert may write back, per entity.
 const REVERTABLE = {
-  task: new Set(['title', 'description', 'status', 'waiting_reason', 'assignee', 'priority', 'due', 'project_id', 'parent_id', 'tags', 'worker', 'needs_review', 'position', 'archived_at', 'deleted_at']),
+  task: new Set(['title', 'description', 'status', 'waiting_reason', 'assignee', 'priority', 'due', 'project_id', 'parent_id', 'tags', 'classification_suggestions', 'worker', 'needs_review', 'position', 'archived_at', 'deleted_at']),
   criteria: new Set(['text', 'done', 'checked_by', 'checked_by_name', 'checked_at', 'deleted_at', 'position']),
   note: new Set(['body', 'kind', 'deleted_at']),
   file: new Set(['name', 'deleted_at']),
@@ -162,6 +170,22 @@ function cleanTags(tags) {
   return out;
 }
 
+function cleanClassificationSuggestions(suggestions) {
+  if (suggestions == null) return [];
+  if (!Array.isArray(suggestions)) throw new StoreError(400, 'classification_suggestions must be an array');
+  return suggestions.slice(0, 20).map((suggestion) => {
+    if (!suggestion || typeof suggestion !== 'object') throw new StoreError(400, 'invalid classification suggestion');
+    const kind = String(suggestion.kind || '').trim();
+    const key = String(suggestion.key || '').trim();
+    const name = String(suggestion.name || '').trim();
+    const confidence = Number(suggestion.confidence);
+    if (!kind || !key || !name || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
+      throw new StoreError(400, 'invalid classification suggestion');
+    }
+    return { kind, key, name, confidence };
+  });
+}
+
 function safeFileName(name) {
   // strip directories and characters that are unsafe in file names
   const base = String(name || 'file').split(/[\\/]/).pop().replace(/[<>:"|?*]|[^\P{Cc}]/gu, '_').trim();
@@ -188,11 +212,19 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
   db.exec('PRAGMA journal_mode=WAL');
   db.exec('PRAGMA foreign_keys=ON');
   db.exec(SCHEMA);
+  const taskColumns = db.prepare('PRAGMA table_info(tasks)').all().map((column) => column.name);
+  if (!taskColumns.includes('classification_suggestions')) {
+    db.exec("ALTER TABLE tasks ADD COLUMN classification_suggestions TEXT NOT NULL DEFAULT '[]'");
+  }
 
   const q = (sql) => db.prepare(sql);
   const get = (sql, ...p) => q(sql).get(...p);
   const all = (sql, ...p) => q(sql).all(...p);
   const run = (sql, ...p) => q(sql).run(...p);
+
+  for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
+    run('INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?,?,?)', key, value, now());
+  }
 
   function tx(fn) {
     db.exec('BEGIN');
@@ -305,6 +337,31 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
     });
   }
 
+  // ---------- settings ----------
+  function getSettings() {
+    const settings = { ...DEFAULT_SETTINGS };
+    for (const row of all('SELECT key, value FROM settings')) {
+      if (row.key === 'classification_mode' && CLASSIFICATION_MODES.includes(row.value)) settings[row.key] = row.value;
+    }
+    return settings;
+  }
+
+  function updateSettings(patch, actor) {
+    actor = normalizeActor(actor);
+    if (actor.kind !== 'human') throw new PolicyError('only humans can change settings');
+    return mutate(() => {
+      if (patch?.classification_mode === undefined) return getSettings();
+      const mode = String(patch.classification_mode);
+      if (!CLASSIFICATION_MODES.includes(mode)) throw new StoreError(400, `classification_mode must be ${CLASSIFICATION_MODES.join('|')}`);
+      const before = getSettings();
+      if (before.classification_mode === mode) return before;
+      run('UPDATE settings SET value = ?, updated_at = ? WHERE key = ?', mode, now(), 'classification_mode');
+      const settings = getSettings();
+      emit('settings.updated', { settings });
+      return settings;
+    });
+  }
+
   // ---------- tasks ----------
   function rowToTask(r) {
     if (!r) return null;
@@ -313,6 +370,7 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
       if (t[k] != null) t[k] = num(t[k]);
     }
     t.tags = JSON.parse(t.tags || '[]');
+    t.classification_suggestions = JSON.parse(t.classification_suggestions || '[]');
     t.needs_review = !!t.needs_review;
     if ('last_note_body' in t) {
       t.last_note = t.last_note_body == null ? null : { body: t.last_note_body, author: t.last_note_author, author_name: t.last_note_author_name, kind: t.last_note_kind, created_at: t.last_note_at };
@@ -488,7 +546,7 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
     applyChanges('task', before.id, changes);
     const t = getTaskRow(before.id, { includeDeleted: true });
     log(actor, action, 'task', before.id, before.id, { changes, ...extraDetail });
-    emit(changes.deleted_at?.[1] ? 'task.deleted' : 'task.updated', { task_id: before.id, task: t, action });
+    emit(changes.deleted_at?.[1] ? 'task.deleted' : 'task.updated', { task_id: before.id, task: t, action, changes });
     return t;
   }
 
@@ -498,12 +556,13 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
     }
   }
 
-  function updateTask(id, patch, actor, { version = patch.version } = {}) {
+  function updateTask(id, patch, actor, { version = patch.version, action = null, extraDetail = {}, classificationSuggestions } = {}) {
     actor = normalizeActor(actor);
     return mutate(() => {
       const before = getTaskRow(id);
       assertVersion(before, version);
       const f = validateTaskFields(patch, actor, { partial: true, existing: before });
+      if (classificationSuggestions !== undefined) f.classification_suggestions = cleanClassificationSuggestions(classificationSuggestions);
       if (f.status !== undefined && f.status !== before.status) {
         if (f.status === 'done') assertAllowed(policy, actor, 'can_close_directly', 'agents cannot close tasks directly');
         f.position = nextPosition(f.status);
@@ -511,8 +570,8 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
         if ((f.status === 'done' || f.status === 'waiting_agent') && f.worker === undefined) f.worker = '';
       }
       const changes = diffTask(before, f);
-      const action = changes.status ? 'task.move' : 'task.update';
-      return commitTaskChanges(before, changes, actor, action);
+      const historyAction = action || (changes.status ? 'task.move' : 'task.update');
+      return commitTaskChanges(before, changes, actor, historyAction, extraDetail);
     });
   }
 
@@ -877,7 +936,9 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
     if (!r) return null;
     const o = { ...r };
     for (const k of Object.keys(o)) o[k] = num(o[k]);
-    if (o.tags != null) o.tags = JSON.parse(o.tags);
+    for (const field of JSON_FIELDS) {
+      if (o[field] != null) o[field] = JSON.parse(o[field]);
+    }
     return o;
   }
 
@@ -951,6 +1012,7 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
   function exportAll() {
     return {
       exported_at: now(),
+      settings: getSettings(),
       lanes,
       projects: listProjects({ includeArchived: true }),
       tasks: all('SELECT * FROM tasks ORDER BY id').map(rowToTask),
@@ -966,6 +1028,7 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
   return {
     lanes, laneIds, policy, db, filesDir, on,
     listProjects, getProject, createProject, updateProject,
+    getSettings, updateSettings,
     listTasks, getTask, createTask, updateTask, moveTask, startTask, askTask, handoffTask, holdTask, doneTask, approveTask, archiveTask, deleteTask, restoreTask, purge,
     listCriteria, addCriterion, updateCriterion, deleteCriterion,
     listNotes, addNote, updateNote, deleteNote,

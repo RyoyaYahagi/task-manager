@@ -7,6 +7,7 @@
 - **完了条件**（受け入れ条件）をチェックリストで持ち、AI の `tm done` は全条件チェック済みでないと拒否
 - 付箋（300 文字）・ファイル添付・HTML プレビュー・サブタスク（1 階層）・プロジェクト・優先度・期限
 - **全操作を「誰が・いつ・何を」で記録**し、どの操作も「元に戻す」で取り消し可能（削除はソフトデリート）
+- JEV による **高確信度のみの自動プロジェクト分け / タグ付け**（既定はオフ。候補は `config/classification.json` で定義）
 - **エージェント権限ポリシー**: AI はタスク削除・人間の記述の改変・他人の操作の取り消しができない（設定で変更可）
 - SSE でライブ更新、楽観ロックで同時編集を保護、ダーク / ライト、PWA（ホーム画面に追加）
 
@@ -49,7 +50,17 @@ Tailscale Serve で HTTPS を公開すると、サービスワーカーが有効
 | `TM_DATA_DIR` | `リポジトリ/data` | SQLite と添付ファイルの保存先。リポジトリ内の独自パスを指定する場合は個別に除外する |
 | `TM_DB` | `$TM_DATA_DIR/tasks.db` | DB ファイル |
 | `TM_LANES` / `TM_POLICY` | `config/*.json` | レーン定義 / エージェント権限 |
+| `TM_CLASSIFICATION_CONFIG` | `config/classification.json` | JEV のプロジェクト / タグ候補と確信度閾値 |
+| `TM_JEV_API_KEY` | なし | JEV API キー。未設定なら自動分類は実行されない |
+| `TYPESAFE_API_KEY` | なし | `TM_JEV_API_KEY` の代替名 |
+| `TM_JEV_BASE_URL` | `https://api.typesafe.ai` | JEV API のベース URL |
+| `TM_JEV_MODEL` | `jev-latest` | JEV モデル |
+| `TM_JEV_TIMEOUT_MS` | `10000` | 自動分類リクエストのタイムアウト（ミリ秒） |
 | `TM_WEBHOOK_URL` | なし | 判断待ちに入った時などに JSON を POST（Slack / Discord の Incoming Webhook 互換） |
+
+自動分類は凡例ダイアログの「自動分類（JEV）」から **オフ / 高確信度のみ自動反映**を選びます。高確信度モードでは新しいタスクの作成時とタイトル・説明・完了条件の更新時に JEV を呼び、既定の閾値 0.85 以上の判定だけを反映します。手入力済みのプロジェクトやタグは変更せず、分類候補にない名前も反映しません。JEV の API キーがない場合は安全側に倒れて何もしません。
+
+プロジェクト候補は設定ファイルに書かれていても、既存のプロジェクトに同名のものがなければ作成しません（`create_missing_projects` は `false`）。未作成の候補は再分類結果としてタスク内の「JEVの分類候補」に保存します。タグは設定ファイルの候補からのみ追加されます。凡例の「既存タスクを再分類」またはタスク詳細の「JEVで再分類」から、既存タスクにも適用できます。候補を採用する場合は、プロジェクトを人間が作成・選択してから再分類します。
 
 CLI 側: `TM_URL`（既定 `http://127.0.0.1:3000`）, `TM_ACTOR`（`agent` / `human`）, `TM_ACTOR_NAME`, `TM_TOKEN`, `TM_FORMAT=json`。
 
@@ -58,6 +69,8 @@ CLI 側: `TM_URL`（既定 `http://127.0.0.1:3000`）, `TM_ACTOR`（`agent` / `h
 タスク本文、添付ファイル、SQLite のサイドカーファイル、ログ、エクスポート、バックアップ、`.env`、秘密鍵、Tailscale の端末固有設定は Git に追加しないでください。これらの代表的なファイルやディレクトリは `.gitignore` で除外しています。
 
 `TM_DATA_DIR` や `TM_DB` をリポジトリ内の別の場所に変更した場合は、その保存先も `.gitignore` に追加してください。`.gitignore` はすでに追跡されているファイルや過去のコミットを削除しないため、コミット前に `git status` と `git diff --cached` で確認します。
+
+`npm start` はリポジトリ直下の `.env.local` を Node.js の組み込み dotenv ローダーで読み込みます。シェルで明示した環境変数が優先されます。`.env.local` は `.gitignore` 対象なので、API キーはそこに保存して問題ありません。共有・コミットする場合は [.env.example](.env.example) の空欄だけを使ってください。
 
 ## 使い方（人間）
 
@@ -93,7 +106,7 @@ tm revert <history_id>                    # 自分の操作を取り消す
 ## API
 
 `GET /api/board`, `GET|POST /api/tasks`, `GET|PATCH|DELETE /api/tasks/:id`, `POST /api/tasks/:id/{move,start,ask,handoff,hold,done,approve,archive,unarchive,restore}`,
-`/api/tasks/:id/{criteria,notes,files,history}`, `PATCH|DELETE /api/{criteria,notes,files}/:id`, `GET|POST /api/projects`,
+`/api/tasks/:id/{criteria,notes,files,history}`, `POST /api/tasks/:id/classify`, `PATCH|DELETE /api/{criteria,notes,files}/:id`, `GET|POST /api/projects`, `GET|PATCH /api/settings`, `POST /api/classification/reclassify`,
 `GET /api/activity`, `POST /api/history/:id/revert`, `GET /api/export`, `GET /api/events` (SSE)。
 
 操作者は `X-Actor: human|agent` と `X-Actor-Name` ヘッダで識別します。更新系は `version` を渡すと不一致で 409。全一覧は [docs/DESIGN.md](docs/DESIGN.md) を参照。
@@ -108,6 +121,7 @@ src/store.js       SQLite・バリデーション・履歴・ロールバック
 src/policy.js      エージェント権限
 config/lanes.json  レーン定義（色・名前・既定で畳むか）
 config/policy.json エージェント権限の既定値
+config/classification.json JEV の分類候補・閾値
 public/            GUI（ビルドなし）
 scripts/seed.js    デモデータ
 test/              node:test

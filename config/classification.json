@@ -1,0 +1,44 @@
+{
+  "threshold": 0.85,
+  "create_missing_projects": false,
+  "projects": [
+    {
+      "key": "research",
+      "name": "研究・調査",
+      "description": "論文、実験、データ解析、技術調査など、知識や根拠を得るための仕事"
+    },
+    {
+      "key": "development",
+      "name": "開発・実装",
+      "description": "アプリ、スクリプト、機能追加、バグ修正、テストなど、成果物を作る仕事"
+    },
+    {
+      "key": "operations",
+      "name": "運用・インフラ",
+      "description": "サーバー、バックアップ、認証、ネットワーク、保守など、動かし続けるための仕事"
+    },
+    {
+      "key": "career",
+      "name": "就活・応募",
+      "description": "求人、応募書類、面接準備、企業調査など、進路や応募に関する仕事"
+    },
+    {
+      "key": "personal",
+      "name": "個人・生活",
+      "description": "健康、家事、買い物、個人予定など、研究や開発以外の生活上の仕事"
+    }
+  ],
+  "tags": [
+    { "key": "research", "name": "調査", "description": "情報、文献、仕様、事例を調べる" },
+    { "key": "implementation", "name": "実装", "description": "コードや設定を変更して成果物を作る" },
+    { "key": "verification", "name": "検証", "description": "テスト、再現、比較、測定で確かめる" },
+    { "key": "document", "name": "文書", "description": "ノート、報告、説明、応募書類などを書く" },
+    { "key": "presentation", "name": "発表", "description": "スライド、発表、デモ、説明会に関係する" },
+    { "key": "automation", "name": "自動化", "description": "繰り返し作業をスクリプトや仕組みで自動化する" },
+    { "key": "bug", "name": "不具合", "description": "失敗、エラー、壊れた挙動の原因を調べて直す" },
+    { "key": "review", "name": "レビュー", "description": "成果物や判断を確認し、改善点を洗い出す" },
+    { "key": "decision", "name": "意思決定", "description": "選択肢を比較し、方針や採用案を決める" },
+    { "key": "external", "name": "外部調査", "description": "外部サイト、サービス、製品、制度などを確認する" },
+    { "key": "infrastructure", "name": "インフラ", "description": "OS、ネットワーク、サーバー、バックアップ、認証に関係する" }
+  ]
+}
