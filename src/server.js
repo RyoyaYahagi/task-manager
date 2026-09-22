@@ -42,7 +42,7 @@ export function createApp({ store, token = null, publicDir = PUBLIC_DIR, webhook
     if (ev.action === 'task.ask') text = `❓ #${t.id} ${t.title} — AI からの質問があります`;
     else if (ev.action === 'task.refine_questions') text = `❓ #${t.id} ${t.title} — AI がタスク詳細について質問しています`;
     else if (ev.action === 'task.refine_propose') text = `📝 #${t.id} ${t.title} — AI がタスク詳細案を作成しました`;
-    else if (ev.action === 'task.refine_failed') text = `⚠️ #${t.id} ${t.title} — AI によるタスク詳細化が失敗しました`;
+    else if (ev.action === 'task.refine_failed') text = `⚠️ #${t.id} ${t.title} — AI深掘りに失敗しました`;
     else if (ev.action === 'task.done' && t.status === 'waiting_human') text = `📝 #${t.id} ${t.title} — 完了報告の確認をお願いします`;
     else if (ev.action === 'task.done') text = `✅ #${t.id} ${t.title} — AI が完了しました`;
     else if (t.status === 'waiting_human' && ev.action === 'task.move') text = `🔔 #${t.id} ${t.title} — あなたの判断待ちに入りました`;
@@ -63,9 +63,15 @@ export function createApp({ store, token = null, publicDir = PUBLIC_DIR, webhook
   route('GET', '/api/settings', () => store.getSettings());
   route('PATCH', '/api/settings', (c) => store.updateSettings(c.body, c.actor));
   route('GET', '/api/board', (c) => store.board(taskFilter(c.query)));
+  route('GET', '/api/usage', () => store.summarizeAiUsage());
   route('GET', '/api/tasks', (c) => store.listTasks(taskFilter(c.query)));
   route('POST', '/api/tasks', (c) => [201, store.createTask(c.body, c.actor)]);
   route('GET', '/api/tasks/:id', (c) => store.getTask(idOf(c.params.id), { includeDeleted: bool(c.query.include_deleted) }));
+  route('GET', '/api/tasks/:id/usage', (c) => store.listAiUsage(idOf(c.params.id)));
+  route('POST', '/api/tasks/:id/usage', (c) => {
+    requireAgent(c.actor);
+    return store.recordAiUsage(idOf(c.params.id), c.body, c.actor);
+  });
   route('PATCH', '/api/tasks/:id', (c) => store.updateTask(idOf(c.params.id), c.body, c.actor));
   route('POST', '/api/tasks/:id/classification/apply', (c) => {
     requireHuman(c.actor);
@@ -167,6 +173,10 @@ export function createApp({ store, token = null, publicDir = PUBLIC_DIR, webhook
 
   function requireHuman(actor) {
     if (actor.kind !== 'human') throw new HttpError(403, 'only humans can request classification', { code: 'human_only' });
+  }
+
+  function requireAgent(actor) {
+    if (actor.kind !== 'agent') throw new HttpError(403, 'only agents can record AI usage', { code: 'agent_only' });
   }
 
   function parseSince(v) {
@@ -325,8 +335,8 @@ export function startFromEnv(env) {
   const classifier = createTaskClassifier({
     store,
     config: loadClassification(env.TM_CLASSIFICATION_CONFIG),
-    apiKey: env.TM_JEV_API_KEY || env.TYPESAFE_API_KEY || '',
-    baseUrl: env.TM_JEV_BASE_URL,
+    gatewayUrl: env.JEV_GATEWAY_URL,
+    gatewayToken: env.JEV_GATEWAY_TOKEN,
     model: env.TM_JEV_MODEL,
     timeoutMs: env.TM_JEV_TIMEOUT_MS,
   });

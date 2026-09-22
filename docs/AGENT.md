@@ -34,7 +34,7 @@ A human and I share a kanban board. Lanes mean **who holds the ball**:
    - Refused with exit 3 while any criterion is unchecked. Either meet it and `tm check`, or report partial progress with `tm done <id> "<what is left and why>" --partial` (goes to the human for review).
    - If the task requires review (`needs_review`), it goes to `waiting_human` as a completion report instead of `done`.
 
-### Turning an unclear task into an executable brief
+### AI深掘りで曖昧なタスクを実行可能な詳細案にする
 
 Use this flow when the title / description does not yet make the problem, deliverable, or completion conditions clear. It is separate from the ordinary execution handoff.
 
@@ -43,14 +43,14 @@ The external runner for this flow is Codex CLI with the current setting `gpt-5.6
 1. A human starts the session with `tm --actor human refine request <id>`.
 2. Run `tm inbox`, then `tm start <id>` as usual. The task will have `mode:refine`.
 3. Read the task context with `tm show <id>`. Use only the task title, description, existing criteria, notes, and explicitly attached files. Do not invent missing facts.
-4. Ask only the minimum blocking questions, grouped into one batch (up to three rounds):
+4. Ask only the current decision-frontier questions, grouped into one batch (up to three rounds). For decision questions, provide mutually exclusive `options` and one `recommended_option` with its `recommendation_reason`:
 
    ```bash
-   tm refine ask <session_id> '[{"question":"何を解決したいですか？","blocking":true},{"question":"期限はありますか？","blocking":false}]'
+   tm refine ask <session_id> '[{"question":"何を優先しますか？","blocking":true,"options":["手戻りを減らす","速度を上げる"],"recommended_option":"手戻りを減らす","recommendation_reason":"完了条件を安定させやすいため"}]'
    ```
 
    The task moves to `waiting_human`. Stop work until the human answers.
-5. After the human hands the task back, inspect the structured answers with `tm refine show <session_id>`. For every question, accept an explicit `answered`, `unknown`, or `delegate` result; do not reinterpret silence as agreement.
+5. After the human hands the task back, inspect the structured answers with `tm refine show <session_id>`. For every question, accept an explicit `answered`, `unknown`, or `delegate` result; use `selected_option` when a choice was made; do not reinterpret silence as agreement.
 6. Propose a complete brief. It must include a problem or purpose, deliverables, at least one completion criterion, and a next action. Keep unresolved non-blocking items explicit:
 
    ```bash

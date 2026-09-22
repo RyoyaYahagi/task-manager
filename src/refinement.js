@@ -4,6 +4,7 @@ export const AGENT_MODES = Object.freeze(['', 'refine', 'execute']);
 export const REFINEMENT_STATUSES = Object.freeze(['pending', 'running', 'waiting_user', 'draft', 'accepted', 'cancelled', 'failed']);
 export const ANSWER_KINDS = Object.freeze(['answered', 'unknown', 'delegate']);
 export const PROVENANCE_KINDS = Object.freeze(['user', 'inference', 'assumption', 'unresolved', 'human_edited']);
+export const OTHER_OPTION = 'その他';
 
 export const BRIEF_FIELDS = Object.freeze([
   'problem', 'purpose', 'background', 'deliverables', 'constraints',
@@ -12,6 +13,8 @@ export const BRIEF_FIELDS = Object.freeze([
 
 const MAX_TEXT = 20000;
 const MAX_ITEM = 1000;
+const MAX_OPTION = 300;
+const MAX_OPTIONS = 6;
 const MAX_QUESTIONS = 12;
 
 const text = (value, max = MAX_TEXT) => String(value ?? '').trim().slice(0, max);
@@ -34,9 +37,22 @@ export function normalizeQuestionItems(input) {
     const row = plainObject(item);
     const question = text(row.question ?? row.prompt, MAX_ITEM);
     if (!question) throw new Error(`question ${position + 1} is required`);
+    const rawOptions = row.options ?? row.choices ?? [];
+    if (rawOptions !== undefined && !Array.isArray(rawOptions)) throw new Error(`question ${position + 1} options must be an array`);
+    const options = list(rawOptions, MAX_OPTIONS + 1).map((option) => text(option, MAX_OPTION));
+    if (options.length === 1 || options.length > MAX_OPTIONS) throw new Error(`question ${position + 1} options must contain 0 or 2..${MAX_OPTIONS} items`);
+    if (new Set(options).size !== options.length) throw new Error(`question ${position + 1} options must be unique`);
+    const recommendedOption = text(row.recommended_option ?? row.recommended, MAX_OPTION);
+    if (options.length && !recommendedOption) throw new Error(`question ${position + 1} recommended_option is required when options are provided`);
+    if (recommendedOption && !options.includes(recommendedOption)) throw new Error(`question ${position + 1} recommended_option must match one of the options`);
+    const recommendationReason = text(row.recommendation_reason ?? row.recommendation, MAX_ITEM);
+    if (options.length && !recommendationReason) throw new Error(`question ${position + 1} recommendation_reason is required when options are provided`);
     return {
       question,
       blocking: row.blocking !== false,
+      options,
+      recommended_option: recommendedOption,
+      recommendation_reason: recommendationReason,
     };
   });
 }
@@ -53,8 +69,10 @@ export function normalizeAnswers(input) {
     const kind = String(row.kind || 'answered');
     if (!ANSWER_KINDS.includes(kind)) throw new Error(`answer ${id} has an invalid kind`);
     const answer = text(row.answer, MAX_ITEM);
-    if ((kind === 'answered' || kind === 'delegate') && !answer) throw new Error(`answer ${id} is required`);
-    return { id, kind, answer };
+    const selectedOption = kind === 'unknown' ? '' : text(row.selected_option ?? row.option, MAX_OPTION);
+    if (selectedOption === OTHER_OPTION && !answer) throw new Error(`answer ${id} needs free text for the other option`);
+    if ((kind === 'answered' || kind === 'delegate') && !answer && !selectedOption) throw new Error(`answer ${id} is required`);
+    return { id, kind, answer, selected_option: selectedOption };
   });
 }
 
@@ -123,7 +141,10 @@ export function briefDiff(before, after) {
 }
 
 export function summarizeQuestions(items, max = 280) {
-  const body = items.map((item, i) => `${i + 1}. ${item.question}`).join(' ');
+  const body = items.map((item, i) => {
+    const recommendation = item.recommended_option ? `（おすすめ: ${item.recommended_option}）` : '';
+    return `${i + 1}. ${item.question}${recommendation}`;
+  }).join(' ');
   return body.length <= max ? body : `${body.slice(0, Math.max(0, max - 1)).trim()}…`;
 }
 

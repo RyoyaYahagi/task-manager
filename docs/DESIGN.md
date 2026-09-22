@@ -1,6 +1,6 @@
 # 設計書 v2: 人間 × AI エージェント共同タスクボード
 
-> v2 からの変更: AI によるタスク詳細化（構造化質問・ブリーフ・人間承認）を追加。v1 からの変更: レーン 6 本確定、UI 日本語のみ、ファイル / HTML タブ追加（Project Hub は除外）、
+> v2 からの変更: AI深掘り（構造化質問・ブリーフ・人間承認）を追加。v1 からの変更: レーン 6 本確定、UI 日本語のみ、ファイル / HTML タブ追加（Project Hub は除外）、
 > 期限・優先度、プロジェクト、サブタスク、完了条件の構造化、監査ログとロールバック、エージェント権限ポリシーを追加。
 > 決定: AI は完了を確定してよい（ロールバック可能にする）。付箋上限はとりあえず 300 文字。優先度 4 段階、期限は日付のみ。
 
@@ -99,7 +99,7 @@ history  (監査ログ)
   reverts INTEGER NULL,      -- この操作が取り消した history.id
   created_at
 
-refinement_sessions  (AI によるタスク詳細化の試行)
+refinement_sessions  (AI深掘りの試行)
   id, task_id FK, attempt, status,
   base_task_version, error,
   created_by, created_by_name, created_at, updated_at, completed_at
@@ -157,12 +157,12 @@ done  ◀───────────────────────�
 誤りがあれば履歴から「元に戻す」
 ```
 
-### 5.2 AI によるタスク詳細化
+### 5.2 AI深掘り
 
 目的は、タイトルや短い依頼をそのまま実装に投げることではなく、**実行可能な依頼へ変換すること**。通常の「エージェントに依頼」とは別の明示操作にする。
 
 ```
-人間: 「AIに詰める」
+人間: 「AI深掘り」
   todo/on_hold → waiting_agent, agent_mode=refine, session=pending
 AI: tm start
   → in_progress, session=running
@@ -178,15 +178,17 @@ AI: refine propose
   → waiting_agent, agent_mode=execute（通常の実装フロー）
 ```
 
-精緻化の質問は blocking / non-blocking を持ち、最大 3 ラウンド。人間は「回答」「不明」「AI に委任」を明示する。AI は情報を発明せず、推定・仮定・未解決を `provenance` に残す。
+AI深掘りの質問は blocking / non-blocking を持ち、最大 3 ラウンド。AI は grill-me 風に現在の判断の分岐点だけをまとめ、判断質問には `options`、`recommended_option`、`recommendation_reason` を付ける。画面にはクリック式の選択肢と「その他（自由回答）」を表示し、人間は「回答」「不明」「AI に委任」を明示する。選択した値は `selected_option` として保存し、「その他」の場合は自由回答を必須にする。AI は情報を発明せず、推定・仮定・未解決を `provenance` に残す。
 
 ブリーフの項目は `problem`, `purpose`, `background`, `deliverables`, `constraints`, `out_of_scope`, `assumptions`, `open_questions`, `next_action`, `criteria`。承認の最低条件は、問題または目的、成果物、完了条件、次の一手が存在し、blocking な未解決事項がないこと。non-blocking の未解決事項は警告として残せる。
 
 AI の案は人間が編集・承認するまで正式なタスク記述ではない。承認時に `criteria` だけを人間名義の正式なチェック項目として追加し、AI はその後も人間の完了条件を改変できない。承認済みブリーフは説明本文とは別に保持する。
 
-精緻化の質問・提案・失敗・承認は専用の履歴と SSE `refinement.updated`、および通常の task history に残す。キャンセル・失敗後は再試行でき、承認の取り消しはブリーフ・セッション・承認時に追加した条件をまとめて戻す。
+AI深掘りの質問・提案・失敗・承認は専用の履歴と SSE `refinement.updated`、および通常の task history に残す。キャンセル・失敗後は再試行でき、承認の取り消しはブリーフ・セッション・承認時に追加した条件をまとめて戻す。
 
-AI ランナーはサーバーの子プロセスではない。運用では Codex CLI が `gpt-5.6-luna` / reasoning effort `max` で動き、`tm` CLI を通じてこの状態機械を進める。これにより、コード実行やリポジトリ操作の権限境界を task-manager の HTTP サーバーから分離する。
+AI深掘りのJEV判定は、Codexが作成した質問または深掘り案を入力にする。質問に選択肢がある場合、JEVは候補から推奨を1つ選び、確信度が閾値未満ならCodexの推奨を変更しない。深掘り案では、JEVが「そのまま提示」「人間に確認」「破棄」のいずれかを判定する。目的・成果物・完了条件を確認できない案は追加質問へ戻し、安全性を確認できない案は表示せず失敗として保留する。JEVが返した採否、routeの確信度、各Noulの確率、判定理由、応答JSONの状態（正常・不完全・不正）と欠落・解釈不能な回答キーは、JEV利用明細のメタデータとして保存し、タスク詳細と `tm show` で確認できる。JEVは自由な質問文やブリーフ本文を生成せず、Codexの生成責務と `tm` の状態変更責務は維持する。JEV の HTTP 呼び出しはローカル Gateway の `JEV_GATEWAY_URL` に送り、TypeSafe の上流認証情報は task-manager のプロセスに渡さない。
+
+AI ランナーはサーバーの子プロセスではない。運用では Codex CLI が `gpt-5.6-luna` / reasoning effort `max` で動き、`tm` CLI を通じてこの状態機械を進める。これにより、コード実行やリポジトリ操作の権限境界を task-manager の HTTP サーバーから分離する。JEV は Codex の代替ではなく、外部ランナー内で選択肢の再評価、出力の安全性確認、深掘り案の品質確認を行う。JEV が確認できない場合は、生成・状態遷移の主体である Codex と `tm` の処理を維持する。
 
 ### 5.3 完了条件（受け入れ条件）の構造化
 
@@ -221,6 +223,7 @@ AI の「完了」を曖昧にしないため、タスクごとに **完了条�
 ### 5.6 JEV 自動分類
 
 - `config/classification.json` に、JEV が選べるプロジェクト候補・タグ候補・閾値を定義する。モデルが自由な名前を返しても、候補キーに一致しない値は反映しない。
+- JEV の HTTP 呼び出しは `JEV_GATEWAY_URL`（既定 `http://127.0.0.1:4789/v1/systemone`）へ送り、必要な場合だけ `JEV_GATEWAY_TOKEN` をローカルアクセス用の Bearer トークンとして付ける。TypeSafe の上流 API キーは Gateway が管理する。
 - GUI の設定は `settings.classification_mode` に保存し、`off`（既定）または `high_confidence` を選べる。
 - `high_confidence` のときだけ、新規タスク作成イベントを契機に JEV を呼び、既定の確信度 0.85 以上のプロジェクト / タグを反映する。
 - 既存のプロジェクトやタグを上書き・削除せず、同時編集でバージョン競合が起きた場合は反映を中止する。
@@ -282,11 +285,11 @@ AI の「完了」を曖昧にしないため、タスクごとに **完了条�
 | GET / PATCH / DELETE | `/api/tasks/:id` | 詳細（完了条件・付箋・ファイル・サブタスク・履歴を含む）/ 更新（`version` 不一致で 409）/ ソフトデリート |
 | POST | `/api/tasks/:id/move` | `{status, index, waiting_reason?}` |
 | POST | `/api/tasks/:id/start` | 作業開始（worker 設定、409 制御） |
-| POST | `/api/tasks/:id/refinements` | 人間が AI にタスク詳細化を依頼（`agent_mode=refine`） |
-| GET | `/api/tasks/:id/refinements` | 精緻化セッション履歴 |
+| POST | `/api/tasks/:id/refinements` | 人間が AI深掘りを依頼（`agent_mode=refine`） |
+| GET | `/api/tasks/:id/refinements` | AI深掘りセッション履歴 |
 | GET | `/api/refinements/:id` | 質問・回答・ブリーフを含むセッション詳細 |
-| POST | `/api/refinements/:id/questions` | AI が質問を提出。`{questions:[{question,blocking?}], version?}` |
-| POST | `/api/refinements/:id/answers` | 人間が回答。`{answers:[{id,kind,answer}], version?}` |
+| POST | `/api/refinements/:id/questions` | AI が質問を提出。`{questions:[{question,blocking?,options?,recommended_option?,recommendation_reason?}], version?}` |
+| POST | `/api/refinements/:id/answers` | 人間が回答。`{answers:[{id,kind,selected_option?,answer}], version?}` |
 | POST | `/api/refinements/:id/brief` | AI がブリーフ案を提出。必須項目がない場合は 422 |
 | PATCH | `/api/refinement-briefs/:id` | 人間がブリーフ案を編集 |
 | POST | `/api/refinement-briefs/:id/accept` | 人間が承認し、完了条件を正式化 |
@@ -335,8 +338,8 @@ tm project add <name> [--color #hex]
 # 進める
 tm start <id> [--force]           # → in_progress, worker=自分
 tm ask <id> <question>            # → waiting_human (質問)
-tm refine request <id>             # 人間: AI に詳細化を依頼（human actor）
-tm refine show <session_id>        # 精緻化セッションを見る
+tm refine request <id>             # 人間: AI深掘りを依頼（human actor）
+tm refine show <session_id>        # AI深掘りセッションを見る
 tm refine ask <session_id> '<JSON>' # AI: 質問を提出
 tm refine answer <session_id> '<JSON>' # 人間: 回答 / unknown / delegate
 tm refine propose <session_id> '<JSON>' # AI: ブリーフ案を提出

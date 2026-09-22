@@ -34,25 +34,35 @@ SSE とファイル取得は `?token=<TM_TOKEN>` でも認証できる（`EventS
 | POST | `/api/tasks/:id/approve` | 人間のみ |
 | POST | `/api/tasks/:id/archive` `/unarchive` `/restore` | |
 
-## AI にタスク詳細を詰める
+## AI深掘り
 
-精緻化は通常の execution (`agent_mode=execute`) と分離された `agent_mode=refine` の状態機械。人間が開始し、AI が質問と案を出し、人間が編集・承認する。
+AI深掘りは通常の execution (`agent_mode=execute`) と分離された `agent_mode=refine` の状態機械。人間が開始し、AI が質問と案を出し、人間が編集・承認する。
 
 | Method | Path | 内容 |
 | --- | --- | --- |
 | POST | `/api/tasks/:id/refinements` | 人間が開始。`{version?}`。タスクを `waiting_agent` にする |
 | GET | `/api/tasks/:id/refinements` | セッション履歴 |
 | GET | `/api/refinements/:id` | セッション、全質問・回答、現在のブリーフ |
-| POST | `/api/refinements/:id/questions` | AI。`{questions:[{question,blocking?}], version?}`。最大 3 ラウンド |
-| POST | `/api/refinements/:id/answers` | 人間。`{answers:[{id,kind,answer}], version?}`。`kind` は `answered` / `unknown` / `delegate` |
+| POST | `/api/refinements/:id/questions` | AI。`{questions:[{question,blocking?,options?,recommended_option?,recommendation_reason?}], version?}`。最大 3 ラウンド。現在の判断の分岐点を聞き、必要なら選択肢とおすすめを付ける |
+| POST | `/api/refinements/:id/answers` | 人間。`{answers:[{id,kind,selected_option?,answer}], version?}`。`kind` は `answered` / `unknown` / `delegate`。画面の「その他」は `selected_option: "その他"` と自由回答で保存 |
 | POST | `/api/refinements/:id/brief` | AI。`{content:{...}, version?}`。問題/目的、成果物、完了条件、次の一手が必要 |
 | PATCH | `/api/refinement-briefs/:id` | 人間。`{content:{...}, version?}`。版を追加して `human_edited` を記録 |
 | POST | `/api/refinement-briefs/:id/accept` | 人間。`{version?}`。完了条件を正式項目へ追加しタスクを `todo` に戻す |
-| POST | `/api/refinements/:id/cancel` | 人間。精緻化をキャンセル |
+| POST | `/api/refinements/:id/cancel` | 人間。AI深掘りをキャンセル |
 | POST | `/api/refinements/:id/retry` | 人間。失敗・キャンセル済みセッションを再試行 |
 | POST | `/api/refinements/:id/fail` | AI。`{error, version?}`。保留にして再試行可能にする |
 
 `GET /api/tasks/:id` には `refinement`（現在の質問 / ドラフト、または直近の失敗）と `brief`（承認済み）が含まれる。更新系はセッションに保存された task version と照合され、409 なら最新タスクを読み直す。
+
+## AI利用コスト
+
+| Method | Path | 内容 |
+| --- | --- | --- |
+| GET | `/api/usage` | 全タスクのJEV / Codex利用集計 |
+| GET | `/api/tasks/:id/usage` | タスク単位のAI利用明細 |
+| POST | `/api/tasks/:id/usage` | agent専用。`provider`, `model`, `input_tokens`, `cached_input_tokens`, `output_tokens`, `cost_usd`, `cost_kind` などを記録 |
+
+`GET /api/tasks/:id` には `ai_usage` と `ai_cost` が含まれる。JEVの料金は公開入力単価に基づく推定、Codexの料金はAPI換算の推定で、実際の契約・プラン請求額ではない。
 
 `GET /api/board` と `/api/tasks` のクエリ: `q` `status` `assignee` `project` `tag` `priority`
 `parent` `top_level` `overdue` `include_archived` `include_deleted`。真偽値は `1` / `true`。

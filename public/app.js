@@ -10,7 +10,7 @@ const ASSIGNEE_LABEL = { human: '人間', agent: 'AI', both: '両方' };
 const ACTION_LABEL = {
   'task.create': 'タスクを作成', 'task.update': '更新', 'task.move': 'レーン移動', 'task.reorder': '並び替え', 'task.start': '作業開始', 'task.ask': '質問して判断待ちへ',
   'task.handoff': 'エージェントに依頼', 'task.hold': '保留', 'task.done': '完了報告', 'task.approve': '承認して完了', 'task.archive': 'アーカイブ', 'task.unarchive': 'アーカイブ解除', 'task.auto_classify': 'JEV が自動分類', 'task.classification_apply': 'JEVの分類候補を反映',
-  'task.refine_request': 'AIに詰める', 'task.refine_retry': '精緻化を再試行', 'task.refine_questions': '精緻化の質問', 'task.refine_answers': '精緻化の回答', 'task.refine_propose': '精緻化案を作成', 'task.refine_accept': '精緻化案を承認', 'task.refine_cancel': '精緻化をキャンセル', 'task.refine_failed': '精緻化に失敗', 'refinement.brief_edit': '精緻化案を編集',
+  'task.refine_request': 'AI深掘りを開始', 'task.refine_retry': 'AI深掘りを再試行', 'task.refine_questions': 'AI深掘りの質問', 'task.refine_answers': 'AI深掘りの回答', 'task.refine_propose': 'AI深掘り案を作成', 'task.refine_accept': 'AI深掘り案を承認', 'task.refine_cancel': 'AI深掘りをキャンセル', 'task.refine_failed': 'AI深掘りに失敗', 'refinement.brief_edit': 'AI深掘り案を編集',
   'task.delete': '削除', 'task.restore': '復元', 'criteria.add': '完了条件を追加', 'criteria.edit': '完了条件を編集', 'criteria.check': '完了条件をチェック', 'criteria.delete': '完了条件を削除',
   'note.add': '付箋を追加', 'note.edit': '付箋を編集', 'note.delete': '付箋を削除', 'file.add': 'ファイルを添付', 'file.delete': 'ファイルを削除',
   'project.create': 'プロジェクトを作成', 'project.update': 'プロジェクトを更新', revert: '元に戻す', purge: '完全削除',
@@ -342,32 +342,157 @@ function briefReadOnly(brief, { compact = false } = {}) {
     return `<div class="brief-row"><dt>${esc(label)} ${provenanceBadge(brief.provenance?.[field])}</dt><dd>${values.map((item) => `<div>${esc(item)}</div>`).join('')}</dd></div>`;
   }).join('')}</div>`;
 }
+
+const REFINEMENT_STATUS_META = {
+  pending: { phase: 1, progress: 25, tone: 'active', label: '外部ランナー待ち', description: 'AI深掘りの依頼を受け付けました。外部ランナーが受信するまで待っています。' },
+  running: { phase: 2, progress: 50, tone: 'active', label: 'AIが深掘り中', description: 'タスクの目的・成果物・完了条件を整理し、必要な質問または詳細案を作成しています。' },
+  waiting_user: { phase: 3, progress: 65, tone: 'waiting', label: 'あなたの回答待ち', description: 'AIからの質問に回答すると、AI深掘りが続きます。' },
+  draft: { phase: 4, progress: 85, tone: 'review', label: '深掘り案の確認待ち', description: 'AIが作成した深掘り案を確認・編集して承認してください。' },
+  accepted: { phase: 4, progress: 100, tone: 'complete', label: '深掘り完了', description: 'AI深掘りが完了しました。通常の「エージェントに依頼」で実装を開始できます。' },
+  failed: { phase: 0, progress: 0, tone: 'error', label: '深掘りに失敗', description: 'エラー内容を確認して、AI深掘りを再試行できます。' },
+  cancelled: { phase: 0, progress: 0, tone: 'cancelled', label: '深掘りをキャンセル済み', description: 'AI深掘りはキャンセルされています。必要なら再試行できます。' },
+};
+
+function refinementStatusMeta(status) {
+  return REFINEMENT_STATUS_META[status] || { phase: 0, progress: 0, tone: 'error', label: status || '状態不明', description: 'AI深掘りの状態を確認できません。' };
+}
+
+function renderRefinementProgress(status, session = null) {
+  const meta = refinementStatusMeta(status);
+  const terminal = ['failed', 'cancelled'].includes(status);
+  const round = Math.max(...(session?.questions || []).map((q) => Number(q.round_no) || 0), 0);
+  const roundLabel = status === 'waiting_user' && round ? ` ・ 質問 ${round}/3` : '';
+  if (terminal) {
+    return `<div class="refinement-progress ${meta.tone}" data-refinement-status="${esc(status)}">
+      <div class="refinement-progress-head"><strong>現在の状態</strong><span>${esc(meta.label)}</span></div>
+      <p class="muted">${esc(meta.description)}</p>
+    </div>`;
+  }
+  return `<div class="refinement-progress ${meta.tone}" data-refinement-status="${esc(status)}">
+    <div class="refinement-progress-head"><strong>AI深掘りの進み具合</strong><span>段階 ${meta.phase}/4${roundLabel}</span></div>
+    <div class="refinement-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${meta.progress}" aria-valuetext="${esc(meta.label)}"><span class="refinement-progress-fill" style="width:${meta.progress}%"></span></div>
+    <div class="refinement-progress-label">${esc(meta.label)}</div>
+    <p class="muted">${esc(meta.description)}</p>
+  </div>`;
+}
+
+const JEV_CHECK_LABELS = {
+  safe: '安全性',
+  frontier: '質問が判断の分岐点か',
+  brief_ready: '目的・成果物',
+  criteria_actionable: '完了条件',
+  unsupported_inference: '根拠のない断定',
+};
+const JEV_ANSWER_LABELS = {
+  route: 'route（扱い）',
+  safe: 'safe（安全性）',
+  frontier: 'frontier（判断の分岐点）',
+  brief_ready: 'brief_ready（目的・成果物）',
+  criteria_actionable: 'criteria_actionable（完了条件）',
+  unsupported_inference: 'unsupported_inference（根拠のない断定）',
+};
+
+function percentage(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 && number <= 1 ? `${Math.round(number * 100)}%` : '不明';
+}
+
+function latestJevJudgment(t) {
+  const record = (t.ai_usage || []).find((item) => item.provider === 'jev' && item.metadata?.refinement_judgment);
+  return record ? { judgment: record.metadata.refinement_judgment, usage: record } : null;
+}
+
+function jevDispositionLabel(value) {
+  return { accept: '採用', review: '人間の確認', reject: '拒否' }[value] || value || '不明';
+}
+
+function jevResponseStatusLabel(value) {
+  return { valid: '正常', incomplete: '不完全', invalid_json: 'JSON不正', invalid_shape: '形式不正' }[value] || value || '不明';
+}
+
+function renderJevJudgment(t) {
+  const entry = latestJevJudgment(t);
+  if (!entry) return '';
+  const judgment = entry.judgment || {};
+  const response = judgment.response || {};
+  const route = judgment.route || {};
+  const disposition = judgment.disposition || '';
+  const checks = Object.entries(judgment.checks || {}).filter(([, value]) => value !== undefined);
+  const findings = (judgment.findings || []).map((item) => `<li><strong>${esc(item.label || item.kind || '確認事項')}</strong><span>${esc(item.detail || '')}</span></li>`).join('');
+  const checkHtml = checks.length ? `<div class="jev-judgment-checks"><strong>判定確率</strong>${checks.map(([key, value]) => `<div><span>${esc(JEV_CHECK_LABELS[key] || key)}</span><b>${percentage(value)}</b></div>`).join('')}</div>` : '';
+  const routeHtml = `<div class="jev-judgment-route"><strong>扱い</strong><span>${esc({ accept: 'そのまま表示', review: '人間の確認へ', reject: '表示しない' }[route.choice] || route.raw || '不明')}（確信度 ${percentage(route.confidence)}）</span></div>`;
+  const missing = (response.missing_keys || []).map((key) => JEV_ANSWER_LABELS[key] || key);
+  const invalid = (response.invalid_keys || []).map((key) => JEV_ANSWER_LABELS[key] || key);
+  const formatDetails = response.status === 'valid'
+    ? '必要な回答キーはそろっています。'
+    : `${missing.length ? `不足: ${missing.join('、')}` : ''}${missing.length && invalid.length ? '。' : ''}${invalid.length ? `解釈不可: ${invalid.join('、')}` : ''}${!missing.length && !invalid.length && response.error ? response.error : ''}`;
+  const responseHtml = `<div class="jev-judgment-response"><strong>JEV応答のJSON形式</strong><span class="jev-format ${response.status === 'valid' ? 'ok' : 'bad'}">${esc(jevResponseStatusLabel(response.status))}</span><small>${esc(formatDetails || '詳細なし')}</small></div>`;
+  const cost = entry.usage?.cost_usd == null ? '' : ` ・ ${formatAiUsd(entry.usage.cost_usd)}`;
+  return `<details class="jev-judgment ${esc(disposition)}"${disposition === 'reject' ? ' open' : ''}><summary><span>JEVの判定詳細</span><strong>${esc(jevDispositionLabel(disposition))}</strong><small>閾値 ${percentage(judgment.threshold)}${cost}</small></summary><div class="jev-judgment-body">${routeHtml}${checkHtml}${findings ? `<div class="jev-judgment-findings"><strong>判定理由</strong><ul>${findings}</ul></div>` : ''}${responseHtml}</div></details>`;
+}
+
 function renderRefinement(t) {
   const r = t.refinement;
   if (!r && !t.brief) return '';
-  let body = '';
+  const status = r?.status || (t.brief ? 'accepted' : null);
+  const statusMeta = refinementStatusMeta(status);
+  let body = renderRefinementProgress(status, r);
+  body += renderJevJudgment(t);
   if (r?.status === 'waiting_user') {
     const lastRound = Math.max(...(r.questions || []).map((q) => q.round_no), 0);
     const questions = (r.questions || []).filter((q) => q.round_no === lastRound && !q.answer_kind);
-    body = `<form class="refinement-form" id="refineAnswerForm" data-form="refine-answer">
-      <p class="muted">AI がタスクを実行可能な形にするための質問です。分からない場合は「不明」、AIに任せる場合は「委任」を選べます。</p>
-      ${questions.map((q) => `<div class="refine-question" data-refine-question="${q.id}"><label><span class="question-label">${esc(q.question)}${q.blocking ? ' <b>必須</b>' : ' <span class="muted">任意</span>'}</span><select class="select" data-refine-kind><option value="answered">回答する</option><option value="unknown">不明</option><option value="delegate">AIに委任</option></select><textarea class="input" data-refine-answer rows="2" placeholder="回答を入力…"></textarea></label></div>`).join('')}
-      <button class="btn primary sm" type="submit">回答して AI に戻す</button>
+    body += `<form class="refinement-form" id="refineAnswerForm" data-form="refine-answer">
+      <p class="muted">AI深掘りの質問です。おすすめを参考に選択肢を選んでください。分からない場合は「不明」、AIに任せる場合は「委任」を選べます。</p>
+      ${questions.map((q) => {
+        const options = Array.isArray(q.options) ? q.options.filter(Boolean) : [];
+        const choiceOptions = options.includes('その他') ? options : [...options, 'その他'];
+        const recommendation = q.recommended_option || '';
+        const selected = q.selected_option || recommendation;
+        const optionField = options.length ? `<div class="refine-options"><span class="refine-option-label">選択肢（クリックして選択）</span><div class="refine-choice-list" role="radiogroup" aria-label="${esc(q.question)}の選択肢">${choiceOptions.map((option) => `<label class="refine-choice"><input type="radio" name="refine-choice-${q.id}" value="${esc(option)}" data-refine-option${selected === option ? ' checked' : ''}><span class="refine-choice-text">${esc(option)}${option === 'その他' ? '（自由回答）' : ''}${option === recommendation ? '（おすすめ）' : ''}</span></label>`).join('')}</div>${recommendation ? `<div class="refine-recommendation"><strong>AIのおすすめ: ${esc(recommendation)}</strong>${q.recommendation_reason ? `<span>おすすめの理由: ${esc(q.recommendation_reason)}</span>` : ''}</div>` : ''}</div>` : '';
+        return `<div class="refine-question" data-refine-question="${q.id}"><label><span class="question-label">${esc(q.question)}${q.blocking ? ' <b>必須</b>' : ' <span class="muted">任意</span>'}</span>${optionField}<select class="select" data-refine-kind><option value="answered">回答する</option><option value="unknown">不明</option><option value="delegate">AIに委任</option></select>${options.length ? '<span class="refine-answer-label">補足・「その他」の内容（任意）</span>' : ''}<textarea class="input" data-refine-answer rows="2" placeholder="${options.length ? '「その他」を選んだ場合は内容を入力…' : '回答を入力…'}"></textarea></label></div>`;
+      }).join('')}
+      <button class="btn primary sm" type="submit">回答してAI深掘りを続ける</button>
     </form>`;
   } else if (r?.status === 'draft' && r.brief) {
     const c = r.brief.content || {};
-    body = `<form class="refinement-form brief-draft" id="refineBriefForm" data-form="refine-edit" data-brief-id="${r.brief.id}">
-      <p class="muted">AI の提案です。必要な箇所を編集してから承認してください。完了条件は承認時に正式なチェック項目へ追加されます。</p>
+    body += `<form class="refinement-form brief-draft" id="refineBriefForm" data-form="refine-edit" data-brief-id="${r.brief.id}">
+      <p class="muted">AI深掘りの案です。必要な箇所を編集してから承認してください。完了条件は承認時に正式なチェック項目へ追加されます。</p>
       <div class="brief-grid">${BRIEF_FIELDS.map(([field, label]) => `<label class="brief-field ${BRIEF_LIST_FIELDS.has(field) ? 'wide' : ''}"><span>${esc(label)} ${provenanceBadge(r.brief.provenance?.[field])}</span>${BRIEF_LIST_FIELDS.has(field) ? `<textarea class="input" data-brief-field="${field}" rows="${field === 'criteria' || field === 'deliverables' ? 3 : 2}">${esc(briefFieldText(c, field))}</textarea><small class="muted">1項目1行${field === 'open_questions' ? '。任意の項目は「[任意]」で開始' : ''}</small>` : `<textarea class="input" data-brief-field="${field}" rows="${field === 'problem' || field === 'purpose' || field === 'next_action' ? 2 : 3}">${esc(briefFieldText(c, field))}</textarea>`}</label>`).join('')}</div>
-      <div class="edit-actions"><button class="btn sm" type="submit">案を保存</button><button class="btn ok sm" type="button" data-act="refine-accept">承認して準備完了</button></div>
+      <div class="edit-actions"><button class="btn sm" type="submit">深掘り案を保存</button><button class="btn ok sm" type="button" data-act="refine-accept">深掘り案を承認して準備完了</button></div>
     </form>`;
   } else if (r && (r.status === 'failed' || r.status === 'cancelled')) {
-    body = `<div class="refinement-status ${r.status}"><p>${r.status === 'failed' ? 'AI による詳細化に失敗しました。' : 'この詳細化セッションはキャンセルされています。'}</p>${r.error ? `<div class="error-text">${esc(r.error)}</div>` : ''}<button class="btn sm" data-act="refine-retry">もう一度試す</button></div>`;
-  } else if (r) {
-    body = `<div class="refinement-status"><p>${r.status === 'pending' ? 'AI の受信箱に入りました。' : 'AI がタスクの詳細を整理しています。'}</p></div>`;
+    body += `<div class="refinement-status ${r.status}">${r.error ? `<div class="error-text">${esc(r.error)}</div>` : ''}${r.status === 'failed' || r.status === 'cancelled' ? '<button class="btn sm" data-act="refine-retry">AI深掘りを再試行</button>' : ''}</div>`;
   }
-  if (t.brief && !r?.brief) body += `<div class="accepted-brief"><div class="section-title">採用済みのタスクブリーフ</div>${briefReadOnly(t.brief)}</div>`;
-  return `<section class="refinement-panel"><div class="section-title">${icon('agent')}AIに詰める${r ? ` <span class="count">${esc(r.status)}</span>` : ''}</div>${body}</section>`;
+  if (t.brief && !r?.brief) body += `<div class="accepted-brief"><div class="section-title">採用済みの詳細案</div>${briefReadOnly(t.brief)}</div>`;
+  return `<section class="refinement-panel"><div class="section-title">${icon('agent')}AI深掘り${status ? ` <span class="count">${esc(statusMeta.label)}</span>` : ''}</div>${body}</section>`;
+}
+
+function formatAiUsd(value) {
+  if (value == null) return '計測不可';
+  const number = Number(value);
+  if (!Number.isFinite(number)) return '計測不可';
+  if (number !== 0 && Math.abs(number) < 0.000001) return '<$0.000001';
+  return `$${number.toFixed(6)}`;
+}
+
+function aiCostKindLabel(kind) {
+  return { actual: '実測', estimated: '推定', mixed: '一部推定', unavailable: '計測不可', none: '' }[kind] || kind || '';
+}
+
+function renderAiUsage(t) {
+  const summary = t.ai_cost;
+  if (!summary?.total?.calls) return '';
+  const providerMeta = [
+    ['jev', 'JEV', 'JEVの公開単価による推定'],
+    ['codex', 'Codex', 'API換算の推定'],
+  ];
+  const cards = providerMeta.map(([key, label, description]) => {
+    const bucket = summary.by_provider?.[key];
+    if (!bucket?.calls) return '';
+    return `<div class="ai-cost-card"><div class="ai-cost-card-head"><strong>${label}</strong><span>${bucket.calls}回</span></div><div class="ai-cost-value">${formatAiUsd(bucket.cost_usd)} <small>${esc(aiCostKindLabel(bucket.cost_kind))}</small></div><div class="ai-cost-detail">入力 ${Number(bucket.input_tokens || 0).toLocaleString()} tokens ・ 出力 ${Number(bucket.output_tokens || 0).toLocaleString()} tokens</div><div class="ai-cost-description">${description}</div></div>`;
+  }).join('');
+  const records = (t.ai_usage || []).slice(0, 8).map((usage) => `<li><span>${esc(usage.provider === 'jev' ? 'JEV' : 'Codex')} / ${esc(usage.model)}</span><strong>${formatAiUsd(usage.cost_usd)}</strong><small>${esc(aiCostKindLabel(usage.cost_kind))} ・ ${rel(usage.created_at)}</small></li>`).join('');
+  return `<section class="ai-usage-panel"><div class="section-title">AI利用コスト <span class="count">合計 ${formatAiUsd(summary.total.cost_usd)}${summary.total.cost_complete ? '' : '（一部不明）'}</span></div><div class="ai-cost-grid">${cards}</div>${records ? `<details class="ai-usage-records"><summary>利用明細（最新 ${Math.min(8, t.ai_usage.length)}件）</summary><ul>${records}</ul></details>` : ''}<p class="muted ai-usage-note">JEVは公開単価、CodexはAPI換算の推定額です。実際の契約・プラン請求額とは異なる場合があります。</p></section>`;
 }
 
 function renderDetail() {
@@ -416,6 +541,7 @@ function renderDetail() {
         <label class="field-check"><input type="checkbox" data-field="needs_review" ${t.needs_review ? 'checked' : ''}><span>AI の完了報告に人間の承認を必要とする</span></label>
       </div>
       ${suggestionHtml}
+      ${renderAiUsage(t)}
       <div>
         <div class="section-title">説明 <button class="btn sm link right" data-act="edit-desc">${icon('edit')}編集</button></div>
         <div class="desc md" data-act="edit-desc">${t.description ? renderMarkdown(t.description) : ''}</div>
@@ -459,10 +585,10 @@ function renderActions(t) {
       <button data-act="classify">JEVで再分類</button>
       <button data-act="delete" class="danger">削除</button>
     </div></div>`;
-  if (t.refinement?.status === 'waiting_user') return `<button class="btn primary" data-act="refine-answer-submit">${icon('send')}回答して AI に戻す</button><button class="btn" data-act="refine-cancel">キャンセル</button>${menu}`;
-  if (t.refinement?.status === 'draft') return `<button class="btn ok" data-act="refine-accept">${icon('check')}案を承認</button><button class="btn" data-act="refine-cancel">キャンセル</button>${menu}`;
-  if (t.refinement?.status === 'failed' || t.refinement?.status === 'cancelled') return `<button class="btn primary" data-act="refine-retry">${icon('undo')}詳細化を再試行</button>${menu}`;
-  if (t.refinement?.status === 'pending' || t.refinement?.status === 'running') return `<button class="btn" data-act="refine-cancel">詳細化をキャンセル</button>${menu}`;
+  if (t.refinement?.status === 'waiting_user') return `<button class="btn primary" data-act="refine-answer-submit">${icon('send')}回答して深掘りを続ける</button><button class="btn" data-act="refine-cancel">AI深掘りをキャンセル</button>${menu}`;
+  if (t.refinement?.status === 'draft') return `<button class="btn ok" data-act="refine-accept">${icon('check')}深掘り案を承認</button><button class="btn" data-act="refine-cancel">AI深掘りをキャンセル</button>${menu}`;
+  if (t.refinement?.status === 'failed' || t.refinement?.status === 'cancelled') return `<button class="btn primary" data-act="refine-retry">${icon('undo')}AI深掘りを再試行</button>${menu}`;
+  if (t.refinement?.status === 'pending' || t.refinement?.status === 'running') return `<button class="btn" data-act="refine-cancel">AI深掘りをキャンセル</button>${menu}`;
   if (t.status === 'waiting_human' && t.waiting_reason === 'review') {
     return `<button class="btn ok" data-act="approve">${icon('check')}承認して完了</button><button class="btn warn" data-act="reject">${icon('undo')}差し戻す</button>${menu}`;
   }
@@ -472,7 +598,7 @@ function renderActions(t) {
   if (t.status === 'done') {
     return `<button class="btn" data-act="reopen">${icon('undo')}再開する</button>${menu}`;
   }
-  const refine = ['todo', 'on_hold'].includes(t.status) ? `<button class="btn primary" data-act="refine-request">${icon('agent')}${t.brief ? 'AIに詰め直す' : 'AIに詰める'}</button>` : '';
+  const refine = ['todo', 'on_hold'].includes(t.status) ? `<button class="btn primary" data-act="refine-request">${icon('agent')}${t.brief ? 'AI深掘りをやり直す' : 'AI深掘り'}</button>` : '';
   return `${refine}<button class="btn ${refine ? '' : 'primary'}" data-act="handoff">${icon('agent')}エージェントに依頼</button><button class="btn" data-act="done">${icon('check')}完了にする</button>${menu}`;
 }
 
@@ -626,7 +752,7 @@ async function act(name, target) {
       }
       case 'refine-request': {
         await api('POST', `/api/tasks/${id}/refinements`, { version: t.version });
-        state.noteDraft = ''; toast('AI にタスク詳細化を依頼しました', 'ok'); scheduleDetail(); loadBoard();
+        state.noteDraft = ''; toast('AI深掘りを依頼しました', 'ok'); scheduleDetail(); loadBoard();
         break;
       }
       case 'refine-answer-submit': {
@@ -643,17 +769,17 @@ async function act(name, target) {
           version = saved.task.version;
         }
         await api('POST', `/api/refinement-briefs/${t.refinement.brief.id}/accept`, { version });
-        toast('タスク詳細案を承認しました', 'ok'); scheduleDetail(); loadBoard();
+        toast('AI深掘り案を承認しました', 'ok'); scheduleDetail(); loadBoard();
         break;
       }
       case 'refine-cancel': {
         await api('POST', `/api/refinements/${t.refinement.id}/cancel`, { version: t.version });
-        toast('タスク詳細化をキャンセルしました', 'ok'); scheduleDetail(); loadBoard();
+        toast('AI深掘りをキャンセルしました', 'ok'); scheduleDetail(); loadBoard();
         break;
       }
       case 'refine-retry': {
         await api('POST', `/api/refinements/${t.refinement.id}/retry`, { version: t.version });
-        toast('タスク詳細化を再試行します', 'ok'); scheduleDetail(); loadBoard();
+        toast('AI深掘りを再試行します', 'ok'); scheduleDetail(); loadBoard();
         break;
       }
       case 'handoff': case 'answer': {
@@ -704,6 +830,13 @@ $('#detail').addEventListener('click', (e) => {
 $('#detail').addEventListener('change', async (e) => {
   const el = e.target;
   if (el.dataset.act === 'crit-toggle' || el.dataset.act === 'html-select') return act(el.dataset.act, el);
+  if (el.dataset.refineKind !== undefined) {
+    const row = el.closest('.refine-question');
+    const choices = row ? $$('[data-refine-option]', row) : [];
+    const disabled = el.value === 'unknown';
+    choices.forEach((choice) => { choice.disabled = disabled; if (disabled) choice.checked = false; });
+    return;
+  }
   const field = el.dataset.field;
   if (!field) return;
   if (field === 'status') {
@@ -737,14 +870,20 @@ $('#detail').addEventListener('submit', async (e) => {
       const title = form.title.value.trim(); if (!title) return;
       await api('POST', '/api/tasks', { title, parent_id: t.id, project: t.project?.name || null, status: 'todo' }); form.title.value = ''; scheduleDetail();
     } else if (form.dataset.form === 'refine-answer') {
-      const answers = $$('.refine-question', form).map((row) => ({
-        id: Number(row.dataset.refineQuestion), kind: $('[data-refine-kind]', row).value, answer: $('[data-refine-answer]', row).value.trim(),
-      }));
+      const answers = $$('.refine-question', form).map((row) => {
+        const selectedOption = $('[data-refine-option]:checked', row)?.value || '';
+        const answer = $('[data-refine-answer]', row).value.trim();
+        return { id: Number(row.dataset.refineQuestion), kind: $('[data-refine-kind]', row).value, selected_option: selectedOption, answer };
+      });
+      if (answers.some((item) => item.selected_option === 'その他' && !item.answer)) {
+        toast('「その他」を選んだ質問には内容を入力してください', 'error');
+        return;
+      }
       await api('POST', `/api/refinements/${t.refinement.id}/answers`, { answers, version: t.version });
-      toast('回答を AI に戻しました', 'ok'); scheduleDetail(); loadBoard();
+      toast('回答をAI深掘りに戻しました', 'ok'); scheduleDetail(); loadBoard();
     } else if (form.dataset.form === 'refine-edit') {
       await api('PATCH', `/api/refinement-briefs/${form.dataset.briefId}`, { content: collectBriefForm(form), version: t.version });
-      toast('タスク詳細案を保存しました', 'ok'); scheduleDetail();
+      toast('AI深掘り案を保存しました', 'ok'); scheduleDetail();
     }
   } catch (err) { handleError(err); }
 });
@@ -944,11 +1083,11 @@ function connect() {
     scheduleBoard();
     if (state.selectedId && (ev.task_id === state.selectedId || ev.task?.parent_id === state.selectedId || state.task?.parent_id === ev.task_id)) scheduleDetail();
     if (ev.type === 'task.updated' && ev.action === 'task.ask' && ev.task) toast(`#${ev.task.id} AI から質問があります`);
-    if (ev.type === 'task.updated' && ev.action === 'task.refine_questions' && ev.task) toast(`#${ev.task.id} AI がタスク詳細について質問しています`);
-    if (ev.type === 'task.updated' && ev.action === 'task.refine_propose' && ev.task) toast(`#${ev.task.id} AI がタスク詳細案を作成しました`, 'ok');
+    if (ev.type === 'task.updated' && ev.action === 'task.refine_questions' && ev.task) toast(`#${ev.task.id} AI深掘りの質問があります`);
+    if (ev.type === 'task.updated' && ev.action === 'task.refine_propose' && ev.task) toast(`#${ev.task.id} AI深掘り案を作成しました`, 'ok');
     if (ev.type === 'task.updated' && ev.action === 'task.done' && ev.task) toast(`#${ev.task.id} ${ev.task.status === 'done' ? 'AI が完了しました' : 'AI の完了報告が届きました'}`, 'ok');
   };
-  for (const t of ['task.created', 'task.updated', 'task.deleted', 'task.purged', 'refinement.updated', 'note.created', 'note.updated', 'note.deleted', 'criteria.created', 'criteria.updated', 'criteria.deleted', 'file.created', 'file.updated', 'file.deleted', 'project.created', 'project.updated', 'settings.updated']) es.addEventListener(t, onEvent);
+  for (const t of ['task.created', 'task.updated', 'task.deleted', 'task.purged', 'refinement.updated', 'ai_usage.recorded', 'note.created', 'note.updated', 'note.deleted', 'criteria.created', 'criteria.updated', 'criteria.deleted', 'file.created', 'file.updated', 'file.deleted', 'project.created', 'project.updated', 'settings.updated']) es.addEventListener(t, onEvent);
 }
 
 // The board still needs a live connection for API/SSE data, but the app shell

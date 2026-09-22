@@ -18,6 +18,7 @@ data/
 # Machine-specific deployment details (Tailscale addresses and local paths)
 /docs/ALWAYS-ON.md
 /deploy/task-manager.service
+/deploy/task-manager-codex-runner.service
 
 # Local environment and credentials; commit only sanitized examples
 .env

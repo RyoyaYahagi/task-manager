@@ -31,9 +31,9 @@ tm check <id> 1,2         # 満たした完了条件にチェック
 tm done <id> "<結果>"      # 完了（何をしてどう検証したかを書く）
 ```
 
-## 曖昧なタスクを AI に詰めてもらう
+## AI深掘りで曖昧なタスクを整理する
 
-タイトルだけでは実装に入れないときは、通常の `handoff` ではなく専用の精緻化フローを使う。外部ランナーは Codex CLI（現在の設定: `gpt-5.6-luna` / reasoning effort `max`）で、task-manager 自体は Codex CLI を起動しない。
+タイトルだけでは実装に入れないときは、通常の `handoff` ではなく AI深掘りフローを使う。外部ランナーは Codex CLI（現在の設定: `gpt-5.6-luna` / reasoning effort `max`）で、task-manager 自体は Codex CLI を起動しない。
 
 人間が開始する:
 
@@ -41,10 +41,10 @@ tm done <id> "<結果>"      # 完了（何をしてどう検証したかを書�
 tm --actor human refine request <id>
 ```
 
-AI は `tm inbox` → `tm start` の後、`mode:refine` のタスクとして、既存の説明・条件・付箋・明示された添付だけを根拠に質問する。質問は最大 3 ラウンド、必要なものだけをまとめる:
+AI は `tm inbox` → `tm start` の後、`mode:refine` のタスクとして、既存の説明・条件・付箋・明示された添付だけを根拠に、現在の判断の分岐点を質問する。質問は最大 3 ラウンド、必要なものだけをまとめ、判断質問には選択肢・おすすめ・理由を付ける:
 
 ```bash
-tm refine ask <session_id> '[{"question":"解決したい問題は何ですか？","blocking":true},{"question":"期限はありますか？","blocking":false}]'
+tm refine ask <session_id> '[{"question":"何を優先しますか？","blocking":true,"options":["手戻りを減らす","速度を上げる"],"recommended_option":"手戻りを減らす","recommendation_reason":"完了条件を安定させやすいため"}]'
 ```
 
 人間が回答して再依頼した後、AI は構造化ブリーフを提案する:

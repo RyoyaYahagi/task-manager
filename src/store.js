@@ -7,6 +7,7 @@ import { normalizePolicy, assertAllowed, PolicyError } from './policy.js';
 import {
   normalizeQuestionItems,
   normalizeAnswers,
+  OTHER_OPTION,
   normalizeBrief,
   normalizeProvenance,
   assessBrief,
@@ -14,6 +15,7 @@ import {
   summarizeQuestions,
   summarizeBrief,
 } from './refinement.js';
+import { normalizeUsageRecord } from './usage.js';
 
 export const ASSIGNEES = ['human', 'agent', 'both'];
 export const ACTOR_KINDS = ['human', 'agent'];
@@ -97,7 +99,11 @@ CREATE TABLE IF NOT EXISTS refinement_questions (
   position REAL NOT NULL DEFAULT 0,
   question TEXT NOT NULL,
   blocking INTEGER NOT NULL DEFAULT 1,
+  options TEXT NOT NULL DEFAULT '[]',
+  recommended_option TEXT NOT NULL DEFAULT '',
+  recommendation_reason TEXT NOT NULL DEFAULT '',
   answer TEXT,
+  selected_option TEXT NOT NULL DEFAULT '',
   answer_kind TEXT,
   answered_by TEXT,
   answered_by_name TEXT,
@@ -184,6 +190,24 @@ CREATE TABLE IF NOT EXISTS settings (
   value TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS ai_usage (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id INTEGER NOT NULL REFERENCES tasks(id),
+  refinement_session_id INTEGER REFERENCES refinement_sessions(id),
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  input_tokens INTEGER,
+  cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER,
+  total_tokens INTEGER,
+  cost_usd REAL,
+  cost_kind TEXT NOT NULL DEFAULT 'unavailable',
+  pricing_source TEXT NOT NULL DEFAULT '',
+  metadata TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ai_usage_task ON ai_usage(task_id, id);
+CREATE INDEX IF NOT EXISTS ai_usage_provider ON ai_usage(provider, id);
 `;
 
 const TABLE = { task: 'tasks', criteria: 'criteria', note: 'notes', file: 'files', project: 'projects' };
@@ -277,6 +301,19 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
   }
   if (!taskColumns.includes('agent_mode')) {
     db.exec("ALTER TABLE tasks ADD COLUMN agent_mode TEXT NOT NULL DEFAULT ''");
+  }
+  const refinementQuestionColumns = db.prepare('PRAGMA table_info(refinement_questions)').all().map((column) => column.name);
+  if (!refinementQuestionColumns.includes('options')) {
+    db.exec("ALTER TABLE refinement_questions ADD COLUMN options TEXT NOT NULL DEFAULT '[]'");
+  }
+  if (!refinementQuestionColumns.includes('recommended_option')) {
+    db.exec("ALTER TABLE refinement_questions ADD COLUMN recommended_option TEXT NOT NULL DEFAULT ''");
+  }
+  if (!refinementQuestionColumns.includes('recommendation_reason')) {
+    db.exec("ALTER TABLE refinement_questions ADD COLUMN recommendation_reason TEXT NOT NULL DEFAULT ''");
+  }
+  if (!refinementQuestionColumns.includes('selected_option')) {
+    db.exec("ALTER TABLE refinement_questions ADD COLUMN selected_option TEXT NOT NULL DEFAULT ''");
   }
 
   const q = (sql) => db.prepare(sql);
@@ -803,9 +840,14 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
 
   function rowToRefinementQuestion(r) {
     if (!r) return null;
+    const parsedOptions = parseJson(r.options, []);
     return {
       ...r,
       id: num(r.id), session_id: num(r.session_id), round_no: num(r.round_no), position: num(r.position), blocking: !!num(r.blocking),
+      options: Array.isArray(parsedOptions) ? parsedOptions : [],
+      recommended_option: String(r.recommended_option || ''),
+      recommendation_reason: String(r.recommendation_reason || ''),
+      selected_option: String(r.selected_option || ''),
     };
   }
 
@@ -928,7 +970,7 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
       const round = previousRound + 1;
       const ts = now();
       for (const [i, item] of items.entries()) {
-        run('INSERT INTO refinement_questions (session_id, round_no, position, question, blocking, created_at) VALUES (?,?,?,?,?,?)', sessionId, round, i + 1, item.question, item.blocking ? 1 : 0, ts);
+        run('INSERT INTO refinement_questions (session_id, round_no, position, question, blocking, options, recommended_option, recommendation_reason, created_at) VALUES (?,?,?,?,?,?,?,?,?)', sessionId, round, i + 1, item.question, item.blocking ? 1 : 0, JSON.stringify(item.options), item.recommended_option, item.recommendation_reason, ts);
       }
       addNoteRaw(task.id, summarizeQuestions(items), actor, 'question');
       const f = { status: 'waiting_human', waiting_reason: 'question', worker: '', agent_mode: 'refine', position: nextPosition('waiting_human') };
@@ -956,13 +998,17 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
       const pendingIds = new Set(pending.map((row) => row.id));
       for (const value of values) {
         if (!pendingIds.has(value.id)) throw new StoreError(400, `question ${value.id} is not an unanswered question in the latest round`);
+        const question = pending.find((row) => row.id === value.id);
+        if (value.selected_option && value.selected_option !== OTHER_OPTION && !question.options.includes(value.selected_option)) {
+          throw new StoreError(400, `answer ${value.id} selected an invalid option`);
+        }
       }
       const answeredIds = new Set(values.map((value) => value.id));
       const missing = pending.filter((row) => !answeredIds.has(row.id)).map((row) => row.id);
       if (missing.length) throw new StoreError(422, 'all current refinement questions must be answered', { code: 'questions_unanswered', question_ids: missing });
       const ts = now();
       for (const value of values) {
-        run('UPDATE refinement_questions SET answer = ?, answer_kind = ?, answered_by = ?, answered_by_name = ?, answered_at = ? WHERE id = ?', value.answer || null, value.kind, actor.kind, actor.name, ts, value.id);
+        run('UPDATE refinement_questions SET answer = ?, selected_option = ?, answer_kind = ?, answered_by = ?, answered_by_name = ?, answered_at = ? WHERE id = ?', value.answer || null, value.selected_option || '', value.kind, actor.kind, actor.name, ts, value.id);
       }
       const f = { status: 'waiting_agent', waiting_reason: '', worker: '', agent_mode: 'refine', position: nextPosition('waiting_agent') };
       const t = commitTaskChanges(task, diffTask(task, f), actor, 'task.refine_answers', { refinement: { session_id: sessionId, round: lastRound } });
@@ -1162,6 +1208,7 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
           run(`DELETE FROM refinement_questions WHERE session_id IN (${marks})`, ...sessionIds);
           run(`DELETE FROM task_briefs WHERE session_id IN (${marks})`, ...sessionIds);
         }
+        run('DELETE FROM ai_usage WHERE task_id = ?', id);
         run('DELETE FROM refinement_sessions WHERE task_id = ?', id);
         run('DELETE FROM history WHERE task_id = ?', id);
         run('UPDATE tasks SET parent_id = NULL WHERE parent_id = ?', id);
@@ -1354,6 +1401,128 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
     });
   }
 
+  // ---------- AI usage and cost ----------
+  function rowToAiUsage(r) {
+    if (!r) return null;
+    return {
+      ...r,
+      id: num(r.id),
+      task_id: num(r.task_id),
+      refinement_session_id: r.refinement_session_id == null ? null : num(r.refinement_session_id),
+      input_tokens: r.input_tokens == null ? null : num(r.input_tokens),
+      cached_input_tokens: num(r.cached_input_tokens || 0),
+      output_tokens: r.output_tokens == null ? null : num(r.output_tokens),
+      total_tokens: r.total_tokens == null ? null : num(r.total_tokens),
+      cost_usd: r.cost_usd == null ? null : Number(r.cost_usd),
+      metadata: parseJson(r.metadata, {}),
+    };
+  }
+
+  function listAiUsage(taskId) {
+    getTaskRow(taskId, { includeDeleted: true });
+    return all('SELECT * FROM ai_usage WHERE task_id = ? ORDER BY id DESC', taskId).map(rowToAiUsage);
+  }
+
+  function usageBucket() {
+    return {
+      calls: 0,
+      input_tokens: 0,
+      cached_input_tokens: 0,
+      output_tokens: 0,
+      total_tokens: 0,
+      cost_usd: 0,
+      known_cost_calls: 0,
+      unknown_cost_calls: 0,
+      actual_cost_calls: 0,
+      estimated_cost_calls: 0,
+      cost_complete: true,
+      cost_kind: 'none',
+    };
+  }
+
+  function summarizeUsageRows(rows) {
+    const byProvider = { jev: usageBucket(), codex: usageBucket() };
+    for (const row of rows) {
+      const bucket = byProvider[row.provider] || (byProvider[row.provider] = usageBucket());
+      bucket.calls += 1;
+      bucket.input_tokens += row.input_tokens || 0;
+      bucket.cached_input_tokens += row.cached_input_tokens || 0;
+      bucket.output_tokens += row.output_tokens || 0;
+      bucket.total_tokens += row.total_tokens || 0;
+      if (row.cost_usd == null) {
+        bucket.unknown_cost_calls += 1;
+        bucket.cost_complete = false;
+      } else {
+        bucket.known_cost_calls += 1;
+        bucket.cost_usd += Number(row.cost_usd);
+        if (row.cost_kind === 'actual') bucket.actual_cost_calls += 1;
+        else bucket.estimated_cost_calls += 1;
+      }
+    }
+    for (const bucket of Object.values(byProvider)) {
+      if (!bucket.calls) continue;
+      bucket.cost_usd = bucket.known_cost_calls ? Number(bucket.cost_usd.toFixed(12)) : null;
+      bucket.cost_kind = bucket.unknown_cost_calls
+        ? (bucket.known_cost_calls ? 'mixed' : 'unavailable')
+        : (bucket.actual_cost_calls === bucket.known_cost_calls ? 'actual' : 'estimated');
+    }
+    const total = usageBucket();
+    for (const bucket of Object.values(byProvider)) {
+      total.calls += bucket.calls;
+      total.input_tokens += bucket.input_tokens;
+      total.cached_input_tokens += bucket.cached_input_tokens;
+      total.output_tokens += bucket.output_tokens;
+      total.total_tokens += bucket.total_tokens;
+      total.known_cost_calls += bucket.known_cost_calls;
+      total.unknown_cost_calls += bucket.unknown_cost_calls;
+      total.actual_cost_calls += bucket.actual_cost_calls;
+      total.estimated_cost_calls += bucket.estimated_cost_calls;
+      if (bucket.cost_usd != null) total.cost_usd += bucket.cost_usd;
+    }
+    total.cost_complete = total.unknown_cost_calls === 0;
+    if (total.calls) {
+      total.cost_usd = total.known_cost_calls ? Number(total.cost_usd.toFixed(12)) : null;
+      total.cost_kind = total.unknown_cost_calls
+        ? (total.known_cost_calls ? 'mixed' : 'unavailable')
+        : (total.actual_cost_calls === total.known_cost_calls ? 'actual' : 'estimated');
+    }
+    return { total, by_provider: byProvider };
+  }
+
+  function summarizeAiUsage(taskId = null) {
+    if (taskId != null) getTaskRow(taskId, { includeDeleted: true });
+    const rows = taskId == null
+      ? all('SELECT * FROM ai_usage ORDER BY id').map(rowToAiUsage)
+      : all('SELECT * FROM ai_usage WHERE task_id = ? ORDER BY id', taskId).map(rowToAiUsage);
+    return summarizeUsageRows(rows);
+  }
+
+  function recordAiUsage(taskId, input, actor) {
+    actor = normalizeActor(actor);
+    if (actor.kind !== 'agent') throw new PolicyError('only agents can record AI usage');
+    return mutate(() => {
+      getTaskRow(taskId, { includeDeleted: true });
+      let record;
+      try { record = normalizeUsageRecord(input); } catch (error) { throw new StoreError(400, error.message || 'invalid AI usage'); }
+      if (record.refinement_session_id != null) {
+        const session = getRefinementSessionRow(record.refinement_session_id);
+        if (session.task_id !== Number(taskId)) throw new StoreError(400, 'refinement session does not belong to task');
+      }
+      let metadata;
+      try { metadata = JSON.stringify(record.metadata); } catch { throw new StoreError(400, 'usage metadata must be JSON serializable'); }
+      const result = run(
+        `INSERT INTO ai_usage (task_id, refinement_session_id, provider, model, input_tokens, cached_input_tokens, output_tokens, total_tokens, cost_usd, cost_kind, pricing_source, metadata, created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        taskId, record.refinement_session_id, record.provider, record.model,
+        record.input_tokens, record.cached_input_tokens, record.output_tokens, record.total_tokens,
+        record.cost_usd, record.cost_kind, record.pricing_source, metadata, now(),
+      );
+      const usage = rowToAiUsage(get('SELECT * FROM ai_usage WHERE id = ?', num(result.lastInsertRowid)));
+      emit('ai_usage.recorded', { task_id: Number(taskId), usage, ai_cost: summarizeAiUsage(taskId) });
+      return usage;
+    });
+  }
+
   // ---------- history / revert ----------
   const rowToHistory = (r) => r && {
     ...r, id: num(r.id),
@@ -1526,6 +1695,8 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
     const latest = latestRefinementSessionRow(id);
     t.refinement = refinementView(current || (latest && ['failed', 'cancelled'].includes(latest.status) ? latest : null));
     t.brief = rowToBrief(get("SELECT * FROM task_briefs WHERE task_id = ? AND status = 'accepted' ORDER BY id DESC LIMIT 1", id));
+    t.ai_usage = listAiUsage(id);
+    t.ai_cost = summarizeAiUsage(id);
     return t;
   }
 
@@ -1549,6 +1720,7 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
       refinement_sessions: all('SELECT * FROM refinement_sessions ORDER BY id').map(rowToRefinementSession),
       refinement_questions: all('SELECT * FROM refinement_questions ORDER BY id').map(rowToRefinementQuestion),
       task_briefs: all('SELECT * FROM task_briefs ORDER BY id').map(rowToBrief),
+      ai_usage: all('SELECT * FROM ai_usage ORDER BY id').map(rowToAiUsage),
       history: all('SELECT * FROM history ORDER BY id').map(rowToHistory),
     };
   }
@@ -1564,6 +1736,7 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
     listCriteria, addCriterion, updateCriterion, deleteCriterion,
     listNotes, addNote, updateNote, deleteNote,
     listFiles, getFile, filePath, addFile, deleteFile,
+    listAiUsage, summarizeAiUsage, recordAiUsage,
     listHistory, activity, getHistory, revert,
     board, exportAll, close,
   };

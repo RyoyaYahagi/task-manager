@@ -116,15 +116,15 @@ tm archive <id> / tm unarchive <id>
 tm rm <id>                 # ソフトデリート。既定では人間のみ（agent は exit 2）
 ```
 
-## AI にタスク詳細を詰める
+## AI深掘りでタスクの判断を整理する
 
 通常の実装依頼の前に、問題・目的・成果物・制約・完了条件を構造化するためのフロー。人間が開始し、AI が質問と案を出し、人間が編集・承認する。
 
 ```bash
 tm --actor human refine request <task_id>
 tm refine show <session_id>
-tm refine ask <session_id> '[{"question":"目的は？","blocking":true}]'
-tm --actor human refine answer <session_id> '[{"id":1,"kind":"answered","answer":"手戻りを減らす"}]'
+tm refine ask <session_id> '[{"question":"何を優先しますか？","blocking":true,"options":["手戻りを減らす","速度を上げる"],"recommended_option":"手戻りを減らす","recommendation_reason":"完了条件を安定させやすいため"}]'
+tm --actor human refine answer <session_id> '[{"id":1,"kind":"answered","selected_option":"手戻りを減らす","answer":"補足"}]'
 tm refine propose <session_id> '{"problem":"要件が曖昧","deliverables":["実装"],"criteria":["テストが通る"],"next_action":"仕様を確認する"}'
 tm --actor human refine edit <brief_id> '{"purpose":"実行可能にする"}'
 tm --actor human refine accept <brief_id>
@@ -132,11 +132,20 @@ tm refine fail <session_id> "runner timeout"
 tm --actor human refine retry <session_id>
 ```
 
-`refine ask` / `answer` / `propose` の JSON は配列またはオブジェクトを標準入力 (`-`) からも渡せる。質問は最大 3 ラウンド。回答の `kind` は `answered`（通常回答）、`unknown`（不明）、`delegate`（AI に委任）。
+`refine ask` / `answer` / `propose` の JSON は配列またはオブジェクトを標準入力 (`-`) からも渡せる。質問は最大 3 ラウンド。判断質問には `options`（2〜6個）、`recommended_option`、`recommendation_reason` を指定できる。回答の `kind` は `answered`（通常回答）、`unknown`（不明）、`delegate`（AI に委任）。選択値は `selected_option` に保存され、「その他」を選ぶ場合は `answer` も必須。
 
 ブリーフの必須判定は「問題または目的」「成果物」「完了条件 1 件以上」「次の一手」。blocking な `open_questions` が残る案は 422 で拒否される。`provenance` は AI の提案元を `inference` / `assumption` / `unresolved` として保持し、人間の編集は `human_edited` になる。
 
-精緻化中 (`mode:refine`) は、通常の `tm ask` / `tm handoff` / `tm done` でレビューを迂回できない。承認後にタスクが `todo` に戻るので、通常の `tm handoff` で実装依頼を開始する。
+AI深掘り中 (`mode:refine`) は、通常の `tm ask` / `tm handoff` / `tm done` でレビューを迂回できない。承認後にタスクが `todo` に戻るので、通常の `tm handoff` で実装依頼を開始する。
+
+## AI利用コスト
+
+```bash
+tm usage show                    # JEV / Codex の集計
+tm usage task <task_id>          # タスク単位の利用明細
+```
+
+タスク詳細の `ai_cost` にJEVとCodexの呼び出し回数、トークン数、USD換算が含まれる。JEVは公開入力単価による推定、CodexはAPI換算の推定であり、契約・プランの請求額ではない。JEVの深掘り判定を使った明細には、採否・確信度・判定理由・応答JSONの状態と欠落項目も `metadata.refinement_judgment` として保存される。
 
 `note` を取るコマンドは `-` で標準入力から読める。
 

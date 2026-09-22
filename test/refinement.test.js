@@ -1,6 +1,6 @@
 import { test, describe, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { assessBrief, normalizeBrief, normalizeQuestionItems } from '../src/refinement.js';
+import { assessBrief, normalizeAnswers, normalizeBrief, normalizeQuestionItems } from '../src/refinement.js';
 import { makeStore, startServer, HUMAN, AGENT } from './helpers.js';
 
 describe('task refinement', () => {
@@ -17,6 +17,7 @@ describe('task refinement', () => {
     assert.equal(assessBrief({ problem: 'x' }).ready, false);
     assert.deepEqual(assessBrief({ problem: 'x' }).missing.map((x) => x.field), ['deliverables', 'criteria', 'next_action']);
     assert.throws(() => normalizeQuestionItems([]), /1\.\.12/);
+    assert.throws(() => normalizeAnswers([{ id: 1, kind: 'answered', selected_option: 'その他' }]), /free text/);
   });
 
   describe('store lifecycle', () => {
@@ -34,20 +35,38 @@ describe('task refinement', () => {
 
       const started = store.startTask(task.id, AGENT, { version: requested.task.version });
       const questions = store.submitRefinementQuestions(requested.refinement.id, [
-        { question: '何を解決しますか？', blocking: true },
+        {
+          question: '何を解決しますか？',
+          blocking: true,
+          options: ['手戻りを減らす', '速度を上げる'],
+          recommended_option: '手戻りを減らす',
+          recommendation_reason: 'まず原因となる手戻りを減らすと、成果を確認しやすいためです。',
+        },
         { question: '期限は決まっていますか？', blocking: false },
       ], AGENT, { version: started.version });
       assert.equal(questions.task.waiting_reason, 'question');
       assert.equal(questions.refinement.status, 'waiting_user');
+      assert.deepEqual(questions.refinement.questions[0].options, ['手戻りを減らす', '速度を上げる']);
+      assert.equal(questions.refinement.questions[0].recommended_option, '手戻りを減らす');
+      assert.match(questions.refinement.questions[0].recommendation_reason, /手戻り/);
       assert.throws(() => store.askTask(task.id, '自由形式の質問', AGENT), (e) => e.code === 'refinement_use_questions');
 
       assert.throws(() => store.answerRefinement(requested.refinement.id, [{ id: questions.refinement.questions[0].id, answer: '手戻りを減らす' }], HUMAN, { version: questions.task.version }), (e) => e.code === 'questions_unanswered');
+      assert.throws(() => store.answerRefinement(requested.refinement.id, [
+        { id: questions.refinement.questions[0].id, kind: 'answered', selected_option: 'その他', answer: '' },
+        { id: questions.refinement.questions[1].id, kind: 'unknown', answer: '' },
+      ], HUMAN, { version: questions.task.version }), /free text/);
       const answered = store.answerRefinement(requested.refinement.id, [
-        { id: questions.refinement.questions[0].id, kind: 'answered', answer: '手戻りを減らす' },
+        { id: questions.refinement.questions[0].id, kind: 'answered', selected_option: '手戻りを減らす', answer: '' },
         { id: questions.refinement.questions[1].id, kind: 'unknown', answer: '' },
       ], HUMAN, { version: questions.task.version });
       assert.equal(answered.task.status, 'waiting_agent');
       assert.equal(answered.refinement.status, 'running');
+      assert.equal(answered.refinement.questions[0].selected_option, '手戻りを減らす');
+
+      assert.throws(() => store.submitRefinementQuestions(requested.refinement.id, [
+        { question: '別の質問', options: ['A', 'B'], recommended_option: 'C' },
+      ], AGENT, { version: answered.task.version }), /recommended_option/);
 
       assert.throws(() => store.saveRefinementBrief(requested.refinement.id, { problem: 'x' }, AGENT, { version: answered.task.version }), (e) => e.code === 'brief_not_ready');
       const proposed = store.saveRefinementBrief(requested.refinement.id, {

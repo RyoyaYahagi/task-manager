@@ -3,15 +3,26 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { buildUsageRecord } from './usage.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 export const DEFAULT_CLASSIFICATION_FILE = path.join(here, '..', 'config', 'classification.json');
-export const DEFAULT_JEV_BASE_URL = 'https://api.typesafe.ai';
+export const DEFAULT_JEV_GATEWAY_URL = 'http://127.0.0.1:4789/v1/systemone';
 export const DEFAULT_JEV_MODEL = 'jev-latest';
 export const DEFAULT_JEV_TIMEOUT_MS = 10000;
 export const DEFAULT_CLASSIFICATION_THRESHOLD = 0.85;
 export const AUTO_CLASSIFIER_ACTOR = { kind: 'agent', name: 'jev-auto-classifier' };
 const MAX_TAGS = 20;
+
+export class JevResponseError extends Error {
+  constructor(message, { status = 'invalid_response', response = null, jsonValid = false } = {}) {
+    super(message);
+    this.name = 'JevResponseError';
+    this.responseStatus = status;
+    this.response = response;
+    this.jsonValid = jsonValid;
+  }
+}
 
 function trimSlash(value) {
   return String(value || '').replace(/\/+$/, '');
@@ -54,44 +65,53 @@ export function loadClassification(file = process.env.TM_CLASSIFICATION_CONFIG |
   return normalizeClassification(JSON.parse(readFileSync(file, 'utf8')));
 }
 
-function endpointFor(baseUrl) {
-  const base = trimSlash(baseUrl || DEFAULT_JEV_BASE_URL);
+function endpointFor(gatewayUrl) {
+  const base = trimSlash(gatewayUrl || DEFAULT_JEV_GATEWAY_URL);
   if (base.endsWith('/systemone')) return base;
   if (base.endsWith('/v1')) return `${base}/systemone`;
   return `${base}/v1/systemone`;
 }
 
 export function createJevClient({
-  baseUrl = DEFAULT_JEV_BASE_URL,
-  apiKey = '',
+  gatewayUrl = process.env.JEV_GATEWAY_URL || DEFAULT_JEV_GATEWAY_URL,
+  gatewayToken = process.env.JEV_GATEWAY_TOKEN || '',
   model = DEFAULT_JEV_MODEL,
   timeoutMs = DEFAULT_JEV_TIMEOUT_MS,
   fetchImpl = globalThis.fetch,
 } = {}) {
   if (typeof fetchImpl !== 'function') throw new Error('fetch is not available for JEV');
-  const endpoint = endpointFor(baseUrl);
+  const endpoint = endpointFor(gatewayUrl);
+  const token = String(gatewayToken || '').trim();
 
   return {
     endpoint,
     async classify({ state, questions }) {
-      if (!String(apiKey || '').trim()) throw new Error('JEV API key is not configured');
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), Math.max(500, Number(timeoutMs) || DEFAULT_JEV_TIMEOUT_MS));
       try {
+        const headers = { 'content-type': 'application/json' };
+        if (token) headers.authorization = `Bearer ${token}`;
         const response = await fetchImpl(endpoint, {
           method: 'POST',
-          headers: { authorization: `Bearer ${String(apiKey).trim()}`, 'content-type': 'application/json' },
+          headers,
           body: JSON.stringify({ model, state, questions }),
           signal: controller.signal,
         });
         const text = await response.text();
         let body = null;
-        try { body = text ? JSON.parse(text) : null; } catch { /* handled below */ }
+        let jsonValid = true;
+        try { body = text ? JSON.parse(text) : null; } catch { jsonValid = false; }
         if (!response.ok) {
           const message = typeof body?.error === 'string' ? body.error : body?.error?.message;
           throw new Error(`JEV request failed (${response.status})${message ? `: ${message}` : ''}`);
         }
-        if (!body?.answers || typeof body.answers !== 'object') throw new Error('JEV response did not contain answers');
+        if (!jsonValid) throw new JevResponseError('JEV response was not valid JSON', { status: 'invalid_json', jsonValid: false });
+        if (!body || typeof body !== 'object' || Array.isArray(body)) {
+          throw new JevResponseError('JEV response was not a JSON object', { status: 'invalid_shape', response: body, jsonValid: true });
+        }
+        if (!body.answers || typeof body.answers !== 'object' || Array.isArray(body.answers)) {
+          throw new JevResponseError('JEV response did not contain answers', { status: 'incomplete', response: body, jsonValid: true });
+        }
         return body;
       } catch (error) {
         if (error?.name === 'AbortError') throw new Error('JEV request timed out');
@@ -209,8 +229,8 @@ function selectedProject(store, candidate, config, { allowCreate = config.create
 export function createTaskClassifier({
   store,
   config = loadClassification(),
-  apiKey = process.env.TM_JEV_API_KEY || process.env.TYPESAFE_API_KEY || '',
-  baseUrl = process.env.TM_JEV_BASE_URL || DEFAULT_JEV_BASE_URL,
+  gatewayUrl = process.env.JEV_GATEWAY_URL || DEFAULT_JEV_GATEWAY_URL,
+  gatewayToken = process.env.JEV_GATEWAY_TOKEN || '',
   model = process.env.TM_JEV_MODEL || DEFAULT_JEV_MODEL,
   timeoutMs = process.env.TM_JEV_TIMEOUT_MS || DEFAULT_JEV_TIMEOUT_MS,
   fetchImpl = globalThis.fetch,
@@ -218,7 +238,8 @@ export function createTaskClassifier({
 } = {}) {
   if (!store) throw new Error('store is required');
   config = normalizeClassification(config);
-  const client = createJevClient({ baseUrl, apiKey, model, timeoutMs, fetchImpl });
+  const client = createJevClient({ gatewayUrl, gatewayToken, model, timeoutMs, fetchImpl });
+  const gatewayConfigured = Boolean(String(gatewayUrl || '').trim());
   const pending = new Set();
   let closed = false;
 
@@ -229,10 +250,15 @@ export function createTaskClassifier({
     try {
       const initial = store.getTask(taskId);
       const candidates = candidatesFor(store, config);
-      if (!String(apiKey || '').trim()) return { task: initial, changed: false, unavailable: true, suggestions: [] };
+      if (!gatewayConfigured) return { task: initial, changed: false, unavailable: true, suggestions: [] };
       if (!candidates.projects.length && !candidates.tags.length) return { task: initial, changed: false, suggestions: [] };
       const request = buildJevRequest(initial, { ...candidates, model });
       const response = await client.classify(request);
+      try {
+        store.recordAiUsage(taskId, buildUsageRecord({ provider: 'jev', model: response.model || model, response, metadata: { purpose: 'classification' } }), AUTO_CLASSIFIER_ACTOR);
+      } catch (usageError) {
+        logger.warn?.(`JEV usage could not be recorded for task #${taskId}: ${usageError.message}`);
+      }
       const prediction = predictionFrom(response, candidates);
       const current = store.getTask(taskId);
       const changes = {};
@@ -376,7 +402,7 @@ export function createTaskClassifier({
         model,
         mode: store.getSettings().classification_mode,
         threshold: config.threshold,
-        available: Boolean(String(apiKey || '').trim()),
+        available: gatewayConfigured,
         create_missing_projects: config.create_missing_projects,
         projects: projects.map(({ key, name, description, available }) => ({ key, name, description, available })),
         tags: config.tags.map(({ key, name, description }) => ({ key, name, description })),

@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["action", "questions", "brief", "error"],
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": ["ask", "propose", "wait", "fail"]
+    },
+    "questions": {
+      "anyOf": [
+        {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 3,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["question", "blocking", "options", "recommended_option", "recommendation_reason"],
+            "properties": {
+              "question": { "type": "string", "minLength": 1, "maxLength": 1000 },
+              "blocking": { "type": "boolean" },
+              "options": {
+                "type": "array",
+                "minItems": 0,
+                "maxItems": 6,
+                "items": { "type": "string", "minLength": 1, "maxLength": 300 }
+              },
+              "recommended_option": { "type": ["string", "null"], "maxLength": 300 },
+              "recommendation_reason": { "type": ["string", "null"], "maxLength": 1000 }
+            }
+          }
+        },
+        { "type": "null" }
+      ]
+    },
+    "brief": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["problem", "purpose", "background", "deliverables", "constraints", "out_of_scope", "assumptions", "open_questions", "next_action", "criteria"],
+          "properties": {
+            "problem": { "type": "string" },
+            "purpose": { "type": "string" },
+            "background": { "type": "string" },
+            "deliverables": { "type": "array", "items": { "type": "string" } },
+            "constraints": { "type": "array", "items": { "type": "string" } },
+            "out_of_scope": { "type": "array", "items": { "type": "string" } },
+            "assumptions": { "type": "array", "items": { "type": "string" } },
+            "open_questions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["text", "blocking"],
+                "properties": {
+                  "text": { "type": "string" },
+                  "blocking": { "type": "boolean" }
+                }
+              }
+            },
+            "next_action": { "type": "string" },
+            "criteria": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        { "type": "null" }
+      ]
+    },
+    "error": {
+      "anyOf": [
+        { "type": "string", "maxLength": 1000 },
+        { "type": "null" }
+      ]
+    }
+  }
+}

@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { createTaskClassifier } from '../src/classifier.js';
+import { createJevClient, createTaskClassifier } from '../src/classifier.js';
 import { makeStore, HUMAN } from './helpers.js';
 
 const CONFIG = {
@@ -36,18 +36,37 @@ function mockFetch({ project = 'research', projectConfidence = 0.96, research = 
         tag_0: { type: 'noul', noul: research },
         tag_1: { type: 'noul', noul: implementation },
       },
+      usage: { input_tokens: 100, output_tokens: 10 },
     }), { status: 200, headers: { 'content-type': 'application/json' } });
   };
   return { calls, fetchImpl };
 }
 
 describe('JEV task classifier', () => {
+  test('sends Jev requests to the Gateway and only adds the optional local token', async () => {
+    const calls = [];
+    const client = createJevClient({
+      gatewayUrl: 'http://127.0.0.1:4789/v1/systemone',
+      gatewayToken: 'unit-test-gateway-token',
+      fetchImpl: async (url, options) => {
+        calls.push({ url, options });
+        return new Response(JSON.stringify({ answers: {} }), { status: 200 });
+      },
+    });
+
+    await client.classify({ state: { text: 'test' }, questions: {} });
+
+    assert.equal(calls[0].url, 'http://127.0.0.1:4789/v1/systemone');
+    assert.equal(calls[0].options.headers.authorization, 'Bearer unit-test-gateway-token');
+    assert.equal(calls[0].options.headers['content-type'], 'application/json');
+  });
+
   test('applies only high-confidence allowlisted project and tags', async () => {
     const { store, close } = makeStore();
     const project = store.createProject({ name: '研究・調査' }, HUMAN);
     store.updateSettings({ classification_mode: 'high_confidence' }, HUMAN);
     const { calls, fetchImpl } = mockFetch();
-    const classifier = createTaskClassifier({ store, config: CONFIG, apiKey: 'test-key', baseUrl: 'https://jev.test', fetchImpl, logger: { warn() {} } });
+    const classifier = createTaskClassifier({ store, config: CONFIG, gatewayUrl: 'https://jev.test/v1/systemone', fetchImpl, logger: { warn() {} } });
     try {
       const created = store.createTask({ title: '文献を調べる', description: '根拠を整理する', criteria: ['結果を記録する'] }, HUMAN);
       const classified = await waitFor(() => {
@@ -65,6 +84,8 @@ describe('JEV task classifier', () => {
       assert.equal(classified.history[0].action, 'task.auto_classify');
       assert.equal(classified.history[0].actor_name, 'jev-auto-classifier');
       assert.equal(classified.history[0].detail.classification.threshold, 0.85);
+      assert.equal(classified.ai_cost.by_provider.jev.calls, 1);
+      assert.equal(classified.ai_cost.by_provider.jev.cost_usd, 0.0000042);
     } finally {
       classifier.close();
       close();
@@ -74,7 +95,7 @@ describe('JEV task classifier', () => {
   test('does not call JEV when the mode is off', async () => {
     const { store, close } = makeStore();
     const { calls, fetchImpl } = mockFetch();
-    const classifier = createTaskClassifier({ store, config: CONFIG, apiKey: 'test-key', fetchImpl, logger: { warn() {} } });
+    const classifier = createTaskClassifier({ store, config: CONFIG, gatewayUrl: 'https://jev.test/v1/systemone', fetchImpl, logger: { warn() {} } });
     try {
       store.createTask({ title: '分類しない' }, HUMAN);
       await new Promise((resolve) => setTimeout(resolve, 30));
@@ -91,7 +112,7 @@ describe('JEV task classifier', () => {
     store.createProject({ name: '研究・調査' }, HUMAN);
     store.updateSettings({ classification_mode: 'high_confidence' }, HUMAN);
     const { calls, fetchImpl } = mockFetch({ projectConfidence: 0.84, research: 0.84 });
-    const classifier = createTaskClassifier({ store, config: CONFIG, apiKey: 'test-key', fetchImpl, logger: { warn() {} } });
+    const classifier = createTaskClassifier({ store, config: CONFIG, gatewayUrl: 'https://jev.test/v1/systemone', fetchImpl, logger: { warn() {} } });
     try {
       const created = store.createTask({ title: '確信度が低い' }, HUMAN);
       await new Promise((resolve) => setTimeout(resolve, 50));
@@ -110,7 +131,7 @@ describe('JEV task classifier', () => {
     const { store, close } = makeStore();
     store.createProject({ name: '研究・調査' }, HUMAN);
     const { fetchImpl } = mockFetch({ project: 'development', projectConfidence: 0.97, research: 0.2, implementation: 0.96 });
-    const classifier = createTaskClassifier({ store, config: CONFIG, apiKey: 'test-key', fetchImpl, logger: { warn() {} } });
+    const classifier = createTaskClassifier({ store, config: CONFIG, gatewayUrl: 'https://jev.test/v1/systemone', fetchImpl, logger: { warn() {} } });
     try {
       const task = store.createTask({ title: '実装へ切り替える', project: '研究・調査', tags: ['調査', '手動'] }, HUMAN);
       const result = await classifier.classifyNow(task.id, { force: true, reclassify: true });
@@ -130,7 +151,7 @@ describe('JEV task classifier', () => {
   test('applies stored project and tag suggestions and records a human action', async () => {
     const { store, close } = makeStore();
     const { fetchImpl } = mockFetch({ project: 'development', projectConfidence: 0.97, research: 0.2, implementation: 0.96 });
-    const classifier = createTaskClassifier({ store, config: CONFIG, apiKey: 'test-key', fetchImpl, logger: { warn() {} } });
+    const classifier = createTaskClassifier({ store, config: CONFIG, gatewayUrl: 'https://jev.test/v1/systemone', fetchImpl, logger: { warn() {} } });
     try {
       const task = store.createTask({ title: '候補を反映する' }, HUMAN);
       const classified = await classifier.classifyNow(task.id, { force: true, reclassify: true });

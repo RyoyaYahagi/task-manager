@@ -40,13 +40,13 @@ PROGRESS
   archive <id> / unarchive <id>
   rm <id>                       soft delete (humans only by default)
 
-REFINE (AI にタスク詳細を詰める)
+REFINE (AI深掘り)
   refine request <task_id>      human: start a refinement session
   refine show <session_id>      show questions, answers, and the current brief
   refine ask <session_id> <JSON|->
-                                agent: submit [{"question":"...","blocking":true}]
+                                agent: submit [{"question":"...","blocking":true,"options":["A","B"],"recommended_option":"A","recommendation_reason":"..."}]
   refine answer <session_id> <JSON|->
-                                human: submit [{"id":1,"kind":"answered","answer":"..."}]
+                                human: submit [{"id":1,"kind":"answered","selected_option":"A","answer":"補足"}]
   refine propose <session_id> <JSON|->
                                 agent: submit the structured brief
   refine edit <brief_id> <JSON|->
@@ -54,6 +54,11 @@ REFINE (AI にタスク詳細を詰める)
   refine accept <brief_id>       human: accept the draft and import its criteria
   refine cancel <session_id> / retry <session_id>
   refine fail <session_id> <message>
+
+AI USAGE / COST
+  usage show                    show total JEV/Codex usage and cost
+  usage task <task_id>          show usage records for one task
+  usage record <task_id> <JSON> agent: record one AI call's usage/cost
 
 NOTES / FILES
   note <id> <text|->            add a note (max 300 chars, "-" reads stdin)
@@ -208,10 +213,32 @@ function showTask(t) {
   if (t.refinement) {
     L.push('', `REFINEMENT #${t.refinement.id} attempt ${t.refinement.attempt} (${t.refinement.status})`);
     for (const q of t.refinement.questions || []) {
-      L.push(`  Q${q.id} [round ${q.round_no}${q.blocking ? ', blocking' : ''}] ${q.question}`, `      ${q.answer_kind ? `${q.answer_kind}: ${q.answer || '(空)'}` : '(unanswered)'}`);
+      L.push(`  Q${q.id} [round ${q.round_no}${q.blocking ? ', blocking' : ''}] ${q.question}`);
+      if (q.options?.length) L.push(`      options: ${q.options.map((option) => `${option}${option === q.recommended_option ? ' (recommended)' : ''}`).join(' / ')}`);
+      if (q.recommendation_reason) L.push(`      recommendation: ${q.recommendation_reason}`);
+      L.push(`      ${q.answer_kind ? `${q.answer_kind}${q.selected_option ? ` [${q.selected_option}]` : ''}: ${q.answer || '(空)'}` : '(unanswered)'}`);
     }
     if (t.refinement.brief) L.push(...briefLines(t.refinement.brief).map((line) => '  ' + line));
     if (t.refinement.error) L.push(`  error: ${t.refinement.error}`);
+  }
+  if (t.ai_cost?.total?.calls) {
+    L.push('', 'AI USAGE / COST');
+    for (const provider of ['jev', 'codex']) {
+      const bucket = t.ai_cost.by_provider?.[provider];
+      if (bucket?.calls) L.push(`  ${provider}: ${bucket.calls} calls, input ${bucket.input_tokens} / output ${bucket.output_tokens}, ${fmtUsd(bucket.cost_usd)} (${bucket.cost_kind})`);
+    }
+  }
+  const judgment = [...(t.ai_usage || [])].find((usage) => usage.provider === 'jev' && usage.metadata?.refinement_judgment)?.metadata?.refinement_judgment;
+  if (judgment) {
+    L.push('', 'JEV JUDGMENT');
+    L.push(`  disposition: ${judgment.disposition || '-'}   threshold: ${judgment.threshold == null ? '-' : `${Math.round(judgment.threshold * 100)}%`}`);
+    if (judgment.route) L.push(`  route: ${judgment.route.raw || judgment.route.choice || '-'}   confidence: ${judgment.route.confidence == null ? '-' : `${Math.round(judgment.route.confidence * 100)}%`}`);
+    for (const [key, value] of Object.entries(judgment.checks || {})) L.push(`  check ${key}: ${value == null ? '-' : `${Math.round(value * 100)}%`}`);
+    for (const item of judgment.findings || []) L.push(`  reason: ${item.label || item.kind || '-'} — ${item.detail || '-'}`);
+    if (judgment.response) {
+      const response = judgment.response;
+      L.push(`  response JSON: ${response.status || '-'}${response.missing_keys?.length ? `; missing=${response.missing_keys.join(',')}` : ''}${response.invalid_keys?.length ? `; invalid=${response.invalid_keys.join(',')}` : ''}`);
+    }
   }
   if (t.subtasks.length) { L.push('', `SUBTASKS (${t.subtasks.filter((s) => s.status === 'done').length}/${t.subtasks.length})`); t.subtasks.forEach((s) => L.push(`  #${s.id} [${s.status}] ${s.title}`)); }
   L.push('', `NOTES (${t.notes.length})`);
@@ -237,7 +264,12 @@ function briefLines(brief) {
 function showRefinement(refinement) {
   const L = [`refinement #${refinement.id}  task #${refinement.task.id} ${refinement.task.title}`, `status: ${refinement.status}   attempt: ${refinement.attempt}   base version: ${refinement.base_task_version}`];
   if (refinement.error) L.push(`error: ${refinement.error}`);
-  for (const q of refinement.questions || []) L.push('', `Q${q.id} [round ${q.round_no}${q.blocking ? ', blocking' : ''}] ${q.question}`, `A: ${q.answer_kind ? `${q.answer_kind}${q.answer ? ` — ${q.answer}` : ''}` : '(unanswered)'}`);
+  for (const q of refinement.questions || []) {
+    L.push('', `Q${q.id} [round ${q.round_no}${q.blocking ? ', blocking' : ''}] ${q.question}`);
+    if (q.options?.length) L.push(`options: ${q.options.map((option) => `${option}${option === q.recommended_option ? ' (recommended)' : ''}`).join(' / ')}`);
+    if (q.recommendation_reason) L.push(`recommendation: ${q.recommendation_reason}`);
+    L.push(`A: ${q.answer_kind ? `${q.answer_kind}${q.selected_option ? ` [${q.selected_option}]` : ''}${q.answer ? ` — ${q.answer}` : ''}` : '(unanswered)'}`);
+  }
   if (refinement.brief) L.push('', 'BRIEF', ...briefLines(refinement.brief));
   return L.join('\n');
 }
@@ -254,6 +286,22 @@ function histLine(h) {
   return `${pad('h' + h.id, 5)} ${pad(rel(h.created_at), 9)} ${who}${task}: ${what}${h.reverted_by ? `  (reverted by h${h.reverted_by})` : ''}${h.reverts ? `  (reverts h${h.reverts})` : ''}`;
 }
 function fmtVal(v) { if (v == null || v === '') return '∅'; if (Array.isArray(v)) return '[' + v.join(',') + ']'; return truncate(String(v), 40); }
+function fmtUsd(value) { return value == null ? 'unknown' : `$${Number(value).toFixed(6)}`; }
+function formatUsageLine(u) {
+  return `#${u.id} ${u.provider} ${u.model} input=${u.input_tokens ?? '-'} output=${u.output_tokens ?? '-'} cost=${fmtUsd(u.cost_usd)} (${u.cost_kind}) ${u.created_at}`;
+}
+function formatUsageSummary(summary) {
+  const lines = [];
+  if (summary.total?.calls) {
+    lines.push(`total: ${summary.total.calls} calls, input=${summary.total.input_tokens}, output=${summary.total.output_tokens}, cost=${fmtUsd(summary.total.cost_usd)} (${summary.total.cost_kind})`);
+  }
+  for (const provider of ['jev', 'codex']) {
+    const bucket = summary.by_provider?.[provider];
+    if (!bucket?.calls) continue;
+    lines.push(`${provider}: ${bucket.calls} calls, input=${bucket.input_tokens}, output=${bucket.output_tokens}, cost=${fmtUsd(bucket.cost_usd)} (${bucket.cost_kind})`);
+  }
+  return lines.join('\n') || 'no AI usage';
+}
 
 // ---------- commands ----------
 const commands = {
@@ -318,6 +366,28 @@ const commands = {
       return;
     }
     fail(`unknown refine subcommand "${sub}"`);
+  },
+  async usage() {
+    const sub = pos[1] || 'show';
+    if (sub === 'show') {
+      const summary = await api('GET', '/api/usage');
+      out(summary, () => formatUsageSummary(summary));
+      return;
+    }
+    if (sub === 'task') {
+      const id = idArg(pos[2], 'task id');
+      const usage = await api('GET', `/api/tasks/${id}/usage`);
+      out(usage, () => usage.map(formatUsageLine).join('\n') || 'no AI usage');
+      return;
+    }
+    if (sub === 'record') {
+      const id = idArg(pos[2], 'task id');
+      const record = jsonInput(pos[3], 'usage JSON');
+      const usage = await api('POST', `/api/tasks/${id}/usage`, record);
+      out(usage, () => `recorded ${usage.provider} usage for #${id}`);
+      return;
+    }
+    fail(`unknown usage subcommand "${sub}"`);
   },
   async lanes() {
     const lanes = await api('GET', '/api/lanes');

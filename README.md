@@ -5,7 +5,7 @@
 
 - レーンは「**誰にボールがあるか**」: 未着手 / 進行中 / **あなたの判断待ち** / **エージェント待ち** / 保留 / 完了
 - **完了条件**（受け入れ条件）をチェックリストで持ち、AI の `tm done` は全条件チェック済みでないと拒否
-- **AI にタスク詳細を詰める**機能。問題・目的・背景・成果物・制約・完了条件・次の一手を、質問 → 人間の回答 → 提案 → 承認の順で構造化
+- **AI深掘り**機能。問題・目的・背景・成果物・制約・完了条件・次の一手を、質問 → 人間の回答 → 提案 → 承認の順で構造化
 - 付箋（300 文字）・ファイル添付・HTML プレビュー・サブタスク（1 階層）・プロジェクト・優先度・期限
 - **全操作を「誰が・いつ・何を」で記録**し、どの操作も「元に戻す」で取り消し可能（削除はソフトデリート）
 - JEV による **高確信度のみの自動プロジェクト分け / タグ付け**（既定はオフ。候補は `config/classification.json` で定義）
@@ -52,20 +52,33 @@ Tailscale Serve で HTTPS を公開すると、サービスワーカーが有効
 | `TM_DB` | `$TM_DATA_DIR/tasks.db` | DB ファイル |
 | `TM_LANES` / `TM_POLICY` | `config/*.json` | レーン定義 / エージェント権限 |
 | `TM_CLASSIFICATION_CONFIG` | `config/classification.json` | JEV のプロジェクト / タグ候補と確信度閾値 |
-| `TM_JEV_API_KEY` | なし | JEV API キー。未設定なら自動分類は実行されない |
-| `TYPESAFE_API_KEY` | なし | `TM_JEV_API_KEY` の代替名 |
-| `TM_JEV_BASE_URL` | `https://api.typesafe.ai` | JEV API のベース URL |
+| `JEV_GATEWAY_URL` | `http://127.0.0.1:4789/v1/systemone` | ローカル Jev Gateway のエンドポイント |
+| `JEV_GATEWAY_TOKEN` | なし | Gateway に設定した場合だけ使うローカルアクセス用トークン。TypeSafe の上流 API キーではない |
 | `TM_JEV_MODEL` | `jev-latest` | JEV モデル |
 | `TM_JEV_TIMEOUT_MS` | `10000` | 自動分類リクエストのタイムアウト（ミリ秒） |
+| `TM_JEV_REFINE_ENABLED` | `true` | 外部ランナーでJEVの選択肢再評価・深掘り案検証を使うか |
+| `TM_JEV_REFINE_THRESHOLD` | `0.85` | AI深掘りでJEVの判定を採用する確信度の閾値 |
+| `TM_JEV_INPUT_USD_PER_MILLION` など | 公開単価 | JEVの契約単価を使う場合の入力 / キャッシュ入力 / 出力単価（USD / 1M tokens） |
+| `CODEX_INPUT_USD_PER_MILLION` など | モデル既定値 | CodexのAPI換算に使う入力 / キャッシュ入力 / 出力単価（USD / 1M tokens） |
 | `TM_WEBHOOK_URL` | なし | 判断待ちに入った時などに JSON を POST（Slack / Discord の Incoming Webhook 互換） |
 
-自動分類は画面上部の「JEV自動分類」から **オフ / 高確信度のみ自動反映**を選びます。同じ画面に `config/classification.json` のプロジェクト候補とタグ候補を表示し、未登録プロジェクトは登録できます。候補は新規タスクとタスク詳細の入力補完にも表示されます。高確信度モードでは新しいタスクの作成時とタイトル・説明・完了条件の更新時に JEV を呼び、既定の閾値 0.85 以上の判定だけを反映します。`調査`には文献や仕様だけでなく、外部サイト・サービス・製品・制度の確認も含め、重複する`外部調査`は別タグに分けません。手入力済みのプロジェクトやタグは変更せず、分類候補にない名前も反映しません。JEV の API キーがない場合は安全側に倒れて何もしません。
+自動分類は画面上部の「JEV自動分類」から **オフ / 高確信度のみ自動反映**を選びます。同じ画面に `config/classification.json` のプロジェクト候補とタグ候補を表示し、未登録プロジェクトは登録できます。候補は新規タスクとタスク詳細の入力補完にも表示されます。高確信度モードでは新しいタスクの作成時とタイトル・説明・完了条件の更新時に JEV を呼び、既定の閾値 0.85 以上の判定だけを反映します。`調査`には文献や仕様だけでなく、外部サイト・サービス・製品・制度の確認も含め、重複する`外部調査`は別タグに分けません。手入力済みのプロジェクトやタグは変更せず、分類候補にない名前も反映しません。Jev は `JEV_GATEWAY_URL` のローカル Gateway 経由で呼び出し、Gateway が利用できない場合は安全側に倒れて何もしません。Gateway は `JEV_PASS_ENTRY`（既定値 `jev-api-key`）で上流の TypeSafe 認証情報を管理します。
 
 プロジェクト候補は設定ファイルに書かれていても、既存のプロジェクトに同名のものがなければ自動作成しません（`create_missing_projects` は `false`）。「JEV自動分類」画面から候補をプロジェクトとして登録できます。未登録のまま再分類した候補はタスク内の「JEVの分類候補」に保存され、タスク詳細の「候補を反映」からプロジェクト作成とタスクへの設定をまとめて実行できます。タグは設定ファイルの候補からのみ追加されます。同画面の「既存タスクを再分類」またはタスク詳細の「JEVで再分類」から、既存タスクにも適用できます。
 
 CLI 側: `TM_URL`（既定 `http://127.0.0.1:3000`）, `TM_ACTOR`（`agent` / `human`）, `TM_ACTOR_NAME`, `TM_TOKEN`, `TM_FORMAT=json`。
 
-AI によるタスク精緻化の外部ランナーは Codex CLI と `tm` CLI を組み合わせます。現在の運用設定は Codex CLI の `gpt-5.6-luna`、推論 effort `max` です。task-manager サーバー自身は Codex CLI を起動せず、外部ランナーが `tm` 経由で受信・質問・提案を行います。
+AI深掘りの外部ランナーは Codex CLI と `tm` CLI を組み合わせます。現在の運用設定は Codex CLI の `gpt-5.6-luna`、推論 effort `max` です。task-manager サーバー自身は Codex CLI を起動せず、外部ランナーが `tm` 経由で受信・質問・提案を行います。
+
+このPCでは外部ランナーもユーザーsystemdサービス `task-manager-codex-runner` として常駐します。runnerは `agent_mode=refine`（AI深掘り）のタスクだけを15秒間隔で取得し、Codex CLIに読み取り専用で案を作らせます。選択肢がある質問はJEVが候補を再評価し、深掘り案はJEVが目的・成果物・完了条件・安全性を確認します。確認できない深掘り案は人間への追加質問に戻します。最後に質問・深掘り案・失敗だけを `tm` へ反映します。通常の実装タスクは自動実行しません。Gateway が未設定または一時的に利用できない場合は、既存のCodex処理を継続します。
+
+AI利用コストはタスク詳細の「AI利用コスト」に表示され、JEVとCodexの利用回数・トークン数・ドル換算を明細として保存します。JEVはAPIレスポンスの使用量と公開単価、CodexはJSONLの完了イベントから取得した使用量とAPI単価で計算します。CodexはChatGPT/Codexの実請求ではなくAPI換算の推定額です。JEVの深掘り判定を使った場合は、採否・各判定確率・routeの確信度・判定理由・応答JSONの欠落項目も同じ明細に保存し、タスク詳細に表示します。CLIでは `tm usage show`、`tm usage task <task_id>` で確認できます。
+
+```bash
+systemctl --user status task-manager-codex-runner
+systemctl --user restart task-manager-codex-runner
+journalctl --user -u task-manager-codex-runner -n 50 --no-pager
+```
 
 ## ローカルデータとGit管理
 
@@ -83,15 +96,15 @@ AI によるタスク精緻化の外部ランナーは Codex CLI と `tm` CLI �
 4. AI は完了条件をすべて満たすと完了にします（「承認を必要とする」を付けたタスクは「完了報告」として判断待ちに入り、「承認して完了」/「差し戻す」で判断）。
 5. おかしな操作は、詳細の **履歴** タブか上部の **アクティビティ**（「AI の操作のみ」で絞れる）から「元に戻す」。
 
-### AI にタスク詳細を詰める
+### AI深掘り
 
-タイトルだけで目的・成果物・完了条件が曖昧なときは、通常の「エージェントに依頼」の前に **「AIに詰める」**を使います。
+タイトルだけで目的・成果物・完了条件が曖昧なときは、通常の「エージェントに依頼」の前に **「AI深掘り」**を使います。
 
-1. タスク詳細で「AIに詰める」を押す。
-2. AI が必要な質問だけを最大 3 ラウンドまでまとめて出す。質問は「あなたの判断待ち」に入り、回答・不明・AI への委任を選べる。
-3. AI がタスクブリーフ案を作る。人間は問題、目的、背景、成果物、制約、対象外、前提、未解決事項、次の一手を編集できる。
-4. **「案を承認」**すると、ブリーフ内の完了条件が正式なチェック項目として人間名義で追加され、タスクは未着手に戻る。
-5. その後に「エージェントに依頼」を押すと、通常の実装フローが始まる。
+1. タスク詳細で「AI深掘り」を押す。タスクは「エージェント待ち」に移り、外部ランナー待ち・AI深掘り中・回答待ち・深掘り案の確認待ちを進捗として表示する。
+2. AI が現在の判断の分岐点だけを最大 3 ラウンドまでまとめて出す。判断が必要な質問にはクリック式の選択肢と AI のおすすめ・理由が表示され、最後に「その他（自由回答）」も選べる。回答・不明・AI への委任も選択できる。
+3. AI がタスク詳細案を作る。人間は問題、目的、背景、成果物、制約、対象外、前提、未解決事項、次の一手を編集できる。
+4. **「深掘り案を承認して準備完了」**を押すと、深掘り案の完了条件が正式なチェック項目として人間名義で追加され、タスクは未着手に戻る。
+5. その後に「エージェントに依頼」を押すと、通常の実装フローが始まる。AI深掘りをキャンセルした場合は、タスクを未着手に戻して通常のタスクとして扱える。
 
 AI の推定・仮定・未解決事項には出所ラベルが付きます。必須の問題または目的、成果物、完了条件、次の一手が揃わない案は承認できません。既存のタスク説明本文はこの機能から変更しません。
 
@@ -107,11 +120,13 @@ Claude Code なら **`.claude/skills/task-board/`** がスキルとして読み�
 tm inbox                                  # 依頼されたタスク
 tm show 12                                # 詳細（完了条件・付箋・ファイル・履歴）
 tm start 12                               # 作業開始（作業者を記録）
-tm refine request 12                      # 人間: AI にタスク詳細化を依頼
-tm refine ask 3 '[{"question":"目的は？","blocking":true}]'   # AI: 構造化質問
-tm refine answer 3 '[{"id":1,"kind":"answered","answer":"手戻りを減らす"}]' # 人間: 回答
+tm refine request 12                      # 人間: AI深掘りを依頼
+tm refine ask 3 '[{"question":"何を優先しますか？","blocking":true,"options":["手戻りを減らす","速度を上げる"],"recommended_option":"手戻りを減らす","recommendation_reason":"完了条件を安定させやすいため"}]' # AI: 選択肢つき質問
+tm refine answer 3 '[{"id":1,"kind":"answered","selected_option":"手戻りを減らす","answer":"補足"}]' # 人間: 回答
 tm refine propose 3 '{"problem":"…","deliverables":["…"],"criteria":["…"],"next_action":"…"}' # AI: 提案
 tm refine accept 1                         # 人間: ブリーフを承認
+tm usage show                              # JEV / Codex の利用コスト集計
+tm usage task 12                            # タスク単位のAI利用明細
 tm note 12 "進捗メモ"                      # 付箋
 tm ask 12 "A と B どちらにしますか？"        # → あなたの判断待ち（質問）
 tm check 12 1,2                           # 完了条件にチェック
@@ -129,6 +144,7 @@ tm revert <history_id>                    # 自分の操作を取り消す
 `POST /api/tasks/:id/refinements`, `GET /api/tasks/:id/refinements`, `GET /api/refinements/:id`, `POST /api/refinements/:id/{questions,answers,brief,cancel,retry,fail}`, `PATCH /api/refinement-briefs/:id`, `POST /api/refinement-briefs/:id/accept`,
 `POST /api/tasks/:id/classification/apply`,
 `/api/tasks/:id/{criteria,notes,files,history}`, `POST /api/tasks/:id/classify`, `PATCH|DELETE /api/{criteria,notes,files}/:id`, `GET|POST /api/projects`, `GET|PATCH /api/settings`, `POST /api/classification/reclassify`,
+`GET /api/usage`, `GET /api/tasks/:id/usage`（利用コスト明細）, `POST /api/tasks/:id/usage`（agent 内部記録）`,
 `GET /api/activity`, `POST /api/history/:id/revert`, `GET /api/export`, `GET /api/events` (SSE)。
 
 操作者は `X-Actor: human|agent` と `X-Actor-Name` ヘッダで識別します。更新系は `version` を渡すと不一致で 409。全一覧は [docs/DESIGN.md](docs/DESIGN.md) を参照。
@@ -140,7 +156,8 @@ tm revert <history_id>                    # 自分の操作を取り消す
 bin/tm.js          CLI
 src/server.js      HTTP / SSE / 静的配信 / アップロード
 src/store.js       SQLite・バリデーション・履歴・ロールバック
-src/refinement.js  AI タスク詳細化の正規化・完了判定・出所ルール
+src/refinement.js  AI深掘りの正規化・完了判定・出所ルール
+src/refinement-judge.js  JEVによる選択肢再評価・深掘り案検証
 src/policy.js      エージェント権限
 config/lanes.json  レーン定義（色・名前・既定で畳むか）
 config/policy.json エージェント権限の既定値
