@@ -127,7 +127,7 @@ export function buildRefinementJudgeRequest(task, plan, { model = DEFAULT_JEV_MO
   } else if (plan?.action === 'propose') {
     questions.brief_ready = {
       type: 'noul',
-      instructions: 'Codexの深掘り案が、問題または目的、成果物、次の一手をタスクの内容に即して具体的に整理し、人間の確認に出せる状態か判定する。',
+      instructions: 'Codexの深掘り案が、問題または目的、成果物、完了条件をタスクの内容に即して具体的に整理し、人間の確認に出せる状態か判定する。次の一手や背景などの任意項目が空欄でも、それだけで不備とは判定しない。',
     };
     questions.criteria_actionable = {
       type: 'noul',
@@ -360,7 +360,7 @@ export function evaluateRefinementJudgeResponse(response, plan, { threshold = DE
   }
 
   const findings = [];
-  if (briefReady == null || briefReady < limit) findings.push(finding('brief_ready', '目的・成果物', '問題または目的、成果物、次の一手をより具体化してください。'));
+  if (briefReady == null || briefReady < limit) findings.push(finding('brief_ready', '目的・成果物', '問題または目的、成果物、完了条件をより具体化してください。'));
   if (criteriaActionable == null || criteriaActionable < limit) findings.push(finding('criteria_actionable', '完了条件', '成果物を確認できる完了条件を具体化してください。'));
   if (unsupportedInference == null || unsupportedInference >= limit) findings.push(finding('unsupported_inference', '前提・制約', 'タスクの事実として確認できない前提や断定を確認してください。'));
   if (route.choice !== 'accept' || !route.recognized || route.confidence == null || route.confidence < limit) {

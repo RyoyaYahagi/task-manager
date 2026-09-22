@@ -10,7 +10,7 @@ const ASSIGNEE_LABEL = { human: '人間', agent: 'AI', both: '両方' };
 const ACTION_LABEL = {
   'task.create': 'タスクを作成', 'task.update': '更新', 'task.move': 'レーン移動', 'task.reorder': '並び替え', 'task.start': '作業開始', 'task.ask': '質問して判断待ちへ',
   'task.handoff': 'エージェントに依頼', 'task.hold': '保留', 'task.done': '完了報告', 'task.approve': '承認して完了', 'task.archive': 'アーカイブ', 'task.unarchive': 'アーカイブ解除', 'task.auto_classify': 'JEV が自動分類', 'task.classification_apply': 'JEVの分類候補を反映',
-  'task.refine_request': 'AI深掘りを開始', 'task.refine_retry': 'AI深掘りを再試行', 'task.refine_questions': 'AI深掘りの質問', 'task.refine_answers': 'AI深掘りの回答', 'task.refine_propose': 'AI深掘り案を作成', 'task.refine_accept': 'AI深掘り案を承認', 'task.refine_cancel': 'AI深掘りをキャンセル', 'task.refine_failed': 'AI深掘りに失敗', 'refinement.brief_edit': 'AI深掘り案を編集',
+  'task.refine_request': 'AI深掘りを開始', 'task.refine_retry': 'AI深掘りを再試行', 'task.refine_questions': 'AI深掘りの質問', 'task.refine_answers': 'AI深掘りの回答', 'task.refine_propose': 'AI深掘りの整理案を作成', 'task.refine_accept': 'AI深掘りの整理案を承認', 'task.refine_cancel': 'AI深掘りをキャンセル', 'task.refine_failed': 'AI深掘りに失敗', 'refinement.brief_edit': 'AI深掘りの整理案を編集',
   'task.delete': '削除', 'task.restore': '復元', 'criteria.add': '完了条件を追加', 'criteria.edit': '完了条件を編集', 'criteria.check': '完了条件をチェック', 'criteria.delete': '完了条件を削除',
   'note.add': '付箋を追加', 'note.edit': '付箋を編集', 'note.delete': '付箋を削除', 'file.add': 'ファイルを添付', 'file.delete': 'ファイルを削除',
   'project.create': 'プロジェクトを作成', 'project.update': 'プロジェクトを更新', revert: '元に戻す', purge: '完全削除',
@@ -301,11 +301,15 @@ function closeDetail() {
 }
 
 const BRIEF_FIELDS = [
-  ['problem', '解決したい問題', false], ['purpose', '目的', false], ['background', '背景', true],
-  ['deliverables', '成果物', true], ['constraints', '制約', true], ['out_of_scope', '対象外', true],
-  ['assumptions', '前提', true], ['open_questions', '未解決事項', true], ['next_action', '次の一手', false], ['criteria', '完了条件', true],
+  ['problem', '解決したい問題', false, 'core'], ['purpose', '目的', false, 'core'],
+  ['deliverables', '成果物', true, 'core'], ['criteria', '完了条件', true, 'core'],
+  ['background', '背景', false, 'optional'], ['constraints', '制約', true, 'optional'],
+  ['out_of_scope', '対象外', true, 'optional'], ['assumptions', '前提', true, 'optional'],
+  ['open_questions', '未解決事項', true, 'optional'], ['next_action', '次の一手', false, 'optional'],
 ];
 const BRIEF_LIST_FIELDS = new Set(BRIEF_FIELDS.filter(([, , list]) => list).map(([field]) => field));
+const BRIEF_CORE_FIELDS = BRIEF_FIELDS.filter(([, , , category]) => category === 'core');
+const BRIEF_OPTIONAL_FIELDS = BRIEF_FIELDS.filter(([, , , category]) => category === 'optional');
 function briefFieldText(content, field) {
   const value = content?.[field];
   if (!Array.isArray(value)) return String(value || '');
@@ -328,9 +332,35 @@ function collectBriefForm(form) {
   for (const [field] of BRIEF_FIELDS) content[field] = briefFieldValue(form, field);
   return content;
 }
+function briefHasValue(content, field) {
+  const value = content?.[field];
+  return Array.isArray(value) ? value.length > 0 : Boolean(String(value || '').trim());
+}
+function briefFieldHint(field) {
+  const hints = {
+    problem: '目的と重なる場合は、どちらか一方だけで構いません。',
+    purpose: '解決したい問題がない場合は、達成したい状態を書きます。',
+    deliverables: 'AIが作るもの・変更するものを1項目1行で書きます。',
+    criteria: '人間が結果を確認できる条件を1項目1行で書きます。',
+    background: '判断に必要な背景がある場合だけ書きます。',
+    constraints: '守る必要がある制約がある場合だけ書きます。',
+    out_of_scope: '今回扱わない範囲を明示する場合だけ書きます。',
+    assumptions: '人間が確認した仮定だけを書き、AIの推測で埋めません。',
+    open_questions: '深掘り後にも残った未解決事項だけを書きます。',
+    next_action: '承認後に最初に行う作業が明確な場合だけ書きます。',
+  };
+  return hints[field] || '';
+}
+function briefEditorField(fieldMeta, provenance = {}, content = {}) {
+  const [field, label, list] = fieldMeta;
+  const hint = briefFieldHint(field);
+  const helper = list ? `1項目1行${field === 'open_questions' ? '。任意の項目は「[任意]」で開始' : ''}` : hint;
+  const rows = field === 'criteria' || field === 'deliverables' ? 3 : (field === 'problem' || field === 'purpose' || field === 'next_action' ? 2 : 3);
+  return `<label class="brief-field ${list ? 'wide' : ''}"><span>${esc(label)} ${provenanceBadge(provenance[field])}</span>${list ? `<textarea class="input" data-brief-field="${field}" rows="${rows}">${esc(briefFieldText(content, field))}</textarea>` : `<textarea class="input" data-brief-field="${field}" rows="${rows}">${esc(briefFieldText(content, field))}</textarea>`}<small class="muted">${esc(helper)}</small></label>`;
+}
 function provenanceBadge(value) {
   if (!value) return '';
-  const labels = { user: '本人', inference: '推定', assumption: '前提', unresolved: '未解決', human_edited: '編集済み' };
+  const labels = { user: '確認済み', inference: '推定', assumption: '前提', unresolved: '未解決', human_edited: '編集済み' };
   return `<span class="provenance ${esc(value)}">${esc(labels[value] || value)}</span>`;
 }
 function briefReadOnly(brief, { compact = false } = {}) {
@@ -347,7 +377,7 @@ const REFINEMENT_STATUS_META = {
   pending: { phase: 1, progress: 25, tone: 'active', label: '外部ランナー待ち', description: 'AI深掘りの依頼を受け付けました。外部ランナーが受信するまで待っています。' },
   running: { phase: 2, progress: 50, tone: 'active', label: 'AIが深掘り中', description: 'タスクの目的・成果物・完了条件を整理し、必要な質問または詳細案を作成しています。' },
   waiting_user: { phase: 3, progress: 65, tone: 'waiting', label: 'あなたの回答待ち', description: 'AIからの質問に回答すると、AI深掘りが続きます。' },
-  draft: { phase: 4, progress: 85, tone: 'review', label: '深掘り案の確認待ち', description: 'AIが作成した深掘り案を確認・編集して承認してください。' },
+  draft: { phase: 4, progress: 85, tone: 'review', label: 'タスク整理案の確認待ち', description: 'AIが作成したタスク整理案を確認・編集して承認してください。' },
   accepted: { phase: 4, progress: 100, tone: 'complete', label: '深掘り完了', description: 'AI深掘りが完了しました。通常の「エージェントに依頼」で実装を開始できます。' },
   failed: { phase: 0, progress: 0, tone: 'error', label: '深掘りに失敗', description: 'エラー内容を確認して、AI深掘りを再試行できます。' },
   cancelled: { phase: 0, progress: 0, tone: 'cancelled', label: '深掘りをキャンセル済み', description: 'AI深掘りはキャンセルされています。必要なら再試行できます。' },
@@ -360,8 +390,10 @@ function refinementStatusMeta(status) {
 function renderRefinementProgress(status, session = null) {
   const meta = refinementStatusMeta(status);
   const terminal = ['failed', 'cancelled'].includes(status);
-  const round = Math.max(...(session?.questions || []).map((q) => Number(q.round_no) || 0), 0);
-  const roundLabel = status === 'waiting_user' && round ? ` ・ 質問 ${round}/3` : '';
+  const questions = session?.questions || [];
+  const round = Math.max(...questions.map((q) => Number(q.round_no) || 0), 0);
+  const currentRoundCount = round ? questions.filter((q) => Number(q.round_no) === round).length : 0;
+  const roundLabel = round ? ` ・ ラウンド ${round}/3 ・ 今回 ${currentRoundCount}問 ・ 累計 ${questions.length}問` : '';
   if (terminal) {
     return `<div class="refinement-progress ${meta.tone}" data-refinement-status="${esc(status)}">
       <div class="refinement-progress-head"><strong>現在の状態</strong><span>${esc(meta.label)}</span></div>
@@ -373,6 +405,48 @@ function renderRefinementProgress(status, session = null) {
     <div class="refinement-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${meta.progress}" aria-valuetext="${esc(meta.label)}"><span class="refinement-progress-fill" style="width:${meta.progress}%"></span></div>
     <div class="refinement-progress-label">${esc(meta.label)}</div>
     <p class="muted">${esc(meta.description)}</p>
+  </div>`;
+}
+
+const REFINEMENT_TIMELINE_META = {
+  'task.refine_request': { phase: 1, label: 'AI深掘りの依頼を受け付けました' },
+  'task.refine_retry': { phase: 1, label: 'AI深掘りを再試行します' },
+  'task.start': { phase: 2, label: '外部ランナーが実行を開始しました' },
+  'task.refine_answers': { phase: 2, label: '回答を受け取り、次の判断分岐を再評価します' },
+  'task.refine_questions': { phase: 3, label: '質問を提示しました' },
+  'task.refine_propose': { phase: 4, label: 'タスク整理案を作成しました' },
+  'refinement.brief_edit': { phase: 4, label: 'タスク整理案を人間が編集しました' },
+  'task.refine_accept': { phase: 4, label: 'タスク整理案を承認しました' },
+  'task.refine_cancel': { phase: 0, label: 'AI深掘りをキャンセルしました' },
+  'task.refine_failed': { phase: 0, label: 'AI深掘りに失敗しました' },
+};
+
+function refinementHistorySessionId(history) {
+  return history?.detail?.refinement?.session_id || history?.detail?.refinement_accept?.session_id || null;
+}
+
+function renderRefinementTimeline(t) {
+  const session = t.refinement;
+  if (!session || !Array.isArray(t.history)) return '';
+  const items = t.history.filter((history) => {
+    if (!REFINEMENT_TIMELINE_META[history.action]) return false;
+    const sessionId = refinementHistorySessionId(history);
+    if (sessionId === session.id) return true;
+    const modeChange = history.detail?.changes?.agent_mode;
+    return history.action === 'task.start'
+      && history.created_at >= session.created_at
+      && (!modeChange || modeChange[1] === 'refine');
+  }).sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+  if (!items.length) return '';
+  return `<div class="refinement-timeline" aria-label="AI深掘りの実行履歴">
+    <div class="refinement-timeline-title">実行履歴</div>
+    <ol>${items.map((history) => {
+      const meta = REFINEMENT_TIMELINE_META[history.action];
+      const detail = history.detail?.refinement || {};
+      const round = detail.round ? `（第${detail.round}ラウンド）` : '';
+      const error = history.action === 'task.refine_failed' && history.detail?.error ? `: ${history.detail.error}` : '';
+      return `<li class="refinement-timeline-item phase-${meta.phase}"><span class="refinement-timeline-dot" aria-hidden="true"></span><div><strong>段階 ${meta.phase > 0 ? `${meta.phase}/4` : '終了'}</strong><span>${esc(meta.label)}${esc(round)}${esc(error)}</span><time datetime="${esc(history.created_at)}">${esc(fmtDate(history.created_at))}</time></div></li>`;
+    }).join('')}</ol>
   </div>`;
 }
 
@@ -431,12 +505,24 @@ function renderJevJudgment(t) {
   return `<details class="jev-judgment ${esc(disposition)}"${disposition === 'reject' ? ' open' : ''}><summary><span>JEVの判定詳細</span><strong>${esc(jevDispositionLabel(disposition))}</strong><small>閾値 ${percentage(judgment.threshold)}${cost}</small></summary><div class="jev-judgment-body">${routeHtml}${checkHtml}${findings ? `<div class="jev-judgment-findings"><strong>判定理由</strong><ul>${findings}</ul></div>` : ''}${responseHtml}</div></details>`;
 }
 
+function briefGroundingNotice(brief) {
+  const content = brief?.content || {};
+  const uncertain = BRIEF_FIELDS.filter(([field]) => {
+    const value = content[field];
+    const hasValue = Array.isArray(value) ? value.length > 0 : Boolean(value);
+    return hasValue && ['inference', 'assumption', 'unresolved'].includes(brief?.provenance?.[field]);
+  }).map(([, label]) => label);
+  if (!uncertain.length) return '';
+  return `<div class="warn-box">根拠が未確定の項目があります。${esc(uncertain.join('、'))}は推定・前提・未解決として残っています。内容を確認してから承認してください。</div>`;
+}
+
 function renderRefinement(t) {
   const r = t.refinement;
   if (!r && !t.brief) return '';
   const status = r?.status || (t.brief ? 'accepted' : null);
   const statusMeta = refinementStatusMeta(status);
   let body = renderRefinementProgress(status, r);
+  body += renderRefinementTimeline(t);
   body += renderJevJudgment(t);
   if (r?.status === 'waiting_user') {
     const lastRound = Math.max(...(r.questions || []).map((q) => q.round_no), 0);
@@ -455,15 +541,19 @@ function renderRefinement(t) {
     </form>`;
   } else if (r?.status === 'draft' && r.brief) {
     const c = r.brief.content || {};
+    const optionalOpen = BRIEF_OPTIONAL_FIELDS.some(([field]) => briefHasValue(c, field));
     body += `<form class="refinement-form brief-draft" id="refineBriefForm" data-form="refine-edit" data-brief-id="${r.brief.id}">
-      <p class="muted">AI深掘りの案です。必要な箇所を編集してから承認してください。完了条件は承認時に正式なチェック項目へ追加されます。</p>
-      <div class="brief-grid">${BRIEF_FIELDS.map(([field, label]) => `<label class="brief-field ${BRIEF_LIST_FIELDS.has(field) ? 'wide' : ''}"><span>${esc(label)} ${provenanceBadge(r.brief.provenance?.[field])}</span>${BRIEF_LIST_FIELDS.has(field) ? `<textarea class="input" data-brief-field="${field}" rows="${field === 'criteria' || field === 'deliverables' ? 3 : 2}">${esc(briefFieldText(c, field))}</textarea><small class="muted">1項目1行${field === 'open_questions' ? '。任意の項目は「[任意]」で開始' : ''}</small>` : `<textarea class="input" data-brief-field="${field}" rows="${field === 'problem' || field === 'purpose' || field === 'next_action' ? 2 : 3}">${esc(briefFieldText(c, field))}</textarea>`}</label>`).join('')}</div>
-      <div class="edit-actions"><button class="btn sm" type="submit">深掘り案を保存</button><button class="btn ok sm" type="button" data-act="refine-accept">深掘り案を承認して準備完了</button></div>
+      <p class="muted">AI深掘りのタスク整理案です。必須項目は問題または目的、成果物、完了条件です。必要な箇所を編集してから承認してください。完了条件は承認時に正式なチェック項目へ追加されます。</p>
+      ${briefGroundingNotice(r.brief)}
+      <div class="brief-core-note">「解決したい問題」と「目的」はどちらか一方で構いません。任意項目は空欄のままで承認できます。</div>
+      <div class="brief-grid">${BRIEF_CORE_FIELDS.map((fieldMeta) => briefEditorField(fieldMeta, r.brief.provenance, c)).join('')}</div>
+      <details class="brief-optional"${optionalOpen ? ' open' : ''}><summary>補足項目（必要な場合のみ）</summary><p class="muted">タスクに根拠がある項目だけ確認・編集してください。AIの推測で埋める必要はありません。</p><div class="brief-grid">${BRIEF_OPTIONAL_FIELDS.map((fieldMeta) => briefEditorField(fieldMeta, r.brief.provenance, c)).join('')}</div></details>
+      <div class="edit-actions"><button class="btn sm" type="submit">タスク整理案を保存</button><button class="btn ok sm" type="button" data-act="refine-accept">タスク整理案を承認して準備完了</button></div>
     </form>`;
   } else if (r && (r.status === 'failed' || r.status === 'cancelled')) {
     body += `<div class="refinement-status ${r.status}">${r.error ? `<div class="error-text">${esc(r.error)}</div>` : ''}${r.status === 'failed' || r.status === 'cancelled' ? '<button class="btn sm" data-act="refine-retry">AI深掘りを再試行</button>' : ''}</div>`;
   }
-  if (t.brief && !r?.brief) body += `<div class="accepted-brief"><div class="section-title">採用済みの詳細案</div>${briefReadOnly(t.brief)}</div>`;
+  if (t.brief && (!r?.brief || r.status === 'accepted')) body += `<div class="accepted-brief"><div class="section-title">採用したタスク整理</div>${briefReadOnly(t.brief)}</div>`;
   return `<section class="refinement-panel"><div class="section-title">${icon('agent')}AI深掘り${status ? ` <span class="count">${esc(statusMeta.label)}</span>` : ''}</div>${body}</section>`;
 }
 
@@ -586,7 +676,7 @@ function renderActions(t) {
       <button data-act="delete" class="danger">削除</button>
     </div></div>`;
   if (t.refinement?.status === 'waiting_user') return `<button class="btn primary" data-act="refine-answer-submit">${icon('send')}回答して深掘りを続ける</button><button class="btn" data-act="refine-cancel">AI深掘りをキャンセル</button>${menu}`;
-  if (t.refinement?.status === 'draft') return `<button class="btn ok" data-act="refine-accept">${icon('check')}深掘り案を承認</button><button class="btn" data-act="refine-cancel">AI深掘りをキャンセル</button>${menu}`;
+  if (t.refinement?.status === 'draft') return `<button class="btn ok" data-act="refine-accept">${icon('check')}タスク整理案を承認</button><button class="btn" data-act="refine-cancel">AI深掘りをキャンセル</button>${menu}`;
   if (t.refinement?.status === 'failed' || t.refinement?.status === 'cancelled') return `<button class="btn primary" data-act="refine-retry">${icon('undo')}AI深掘りを再試行</button>${menu}`;
   if (t.refinement?.status === 'pending' || t.refinement?.status === 'running') return `<button class="btn" data-act="refine-cancel">AI深掘りをキャンセル</button>${menu}`;
   if (t.status === 'waiting_human' && t.waiting_reason === 'review') {
@@ -769,7 +859,7 @@ async function act(name, target) {
           version = saved.task.version;
         }
         await api('POST', `/api/refinement-briefs/${t.refinement.brief.id}/accept`, { version });
-        toast('AI深掘り案を承認しました', 'ok'); scheduleDetail(); loadBoard();
+        toast('タスク整理案を承認しました', 'ok'); scheduleDetail(); loadBoard();
         break;
       }
       case 'refine-cancel': {
@@ -883,7 +973,7 @@ $('#detail').addEventListener('submit', async (e) => {
       toast('回答をAI深掘りに戻しました', 'ok'); scheduleDetail(); loadBoard();
     } else if (form.dataset.form === 'refine-edit') {
       await api('PATCH', `/api/refinement-briefs/${form.dataset.briefId}`, { content: collectBriefForm(form), version: t.version });
-      toast('AI深掘り案を保存しました', 'ok'); scheduleDetail();
+      toast('タスク整理案を保存しました', 'ok'); scheduleDetail();
     }
   } catch (err) { handleError(err); }
 });
@@ -1084,7 +1174,7 @@ function connect() {
     if (state.selectedId && (ev.task_id === state.selectedId || ev.task?.parent_id === state.selectedId || state.task?.parent_id === ev.task_id)) scheduleDetail();
     if (ev.type === 'task.updated' && ev.action === 'task.ask' && ev.task) toast(`#${ev.task.id} AI から質問があります`);
     if (ev.type === 'task.updated' && ev.action === 'task.refine_questions' && ev.task) toast(`#${ev.task.id} AI深掘りの質問があります`);
-    if (ev.type === 'task.updated' && ev.action === 'task.refine_propose' && ev.task) toast(`#${ev.task.id} AI深掘り案を作成しました`, 'ok');
+    if (ev.type === 'task.updated' && ev.action === 'task.refine_propose' && ev.task) toast(`#${ev.task.id} タスク整理案を作成しました`, 'ok');
     if (ev.type === 'task.updated' && ev.action === 'task.done' && ev.task) toast(`#${ev.task.id} ${ev.task.status === 'done' ? 'AI が完了しました' : 'AI の完了報告が届きました'}`, 'ok');
   };
   for (const t of ['task.created', 'task.updated', 'task.deleted', 'task.purged', 'refinement.updated', 'ai_usage.recorded', 'note.created', 'note.updated', 'note.deleted', 'criteria.created', 'criteria.updated', 'criteria.deleted', 'file.created', 'file.updated', 'file.deleted', 'project.created', 'project.updated', 'settings.updated']) es.addEventListener(t, onEvent);

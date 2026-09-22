@@ -42,15 +42,15 @@ PROGRESS
 
 REFINE (AI深掘り)
   refine request <task_id>      human: start a refinement session
-  refine show <session_id>      show questions, answers, and the current brief
+  refine show <session_id>      show questions, answers, and the current task organization
   refine ask <session_id> <JSON|->
                                 agent: submit [{"question":"...","blocking":true,"options":["A","B"],"recommended_option":"A","recommendation_reason":"..."}]
   refine answer <session_id> <JSON|->
                                 human: submit [{"id":1,"kind":"answered","selected_option":"A","answer":"補足"}]
   refine propose <session_id> <JSON|->
-                                agent: submit the structured brief
+                                agent: submit the structured task organization
   refine edit <brief_id> <JSON|->
-                                human: edit the draft brief
+                                human: edit the draft task organization
   refine accept <brief_id>       human: accept the draft and import its criteria
   refine cancel <session_id> / retry <session_id>
   refine fail <session_id> <message>
@@ -209,7 +209,7 @@ function showTask(t) {
   L.push('', `CRITERIA (${t.criteria.filter((c) => c.done).length}/${t.criteria.length})`);
   if (!t.criteria.length) L.push('  (none — propose some with: tm criteria add <id> "<text>")');
   t.criteria.forEach((c, i) => L.push(`  ${i + 1}. [${c.done ? 'x' : ' '}] ${c.text}   (by ${c.author_name}${c.done ? `, checked by ${c.checked_by_name} ${rel(c.checked_at)}` : ''})`));
-  if (t.brief) L.push('', 'ACCEPTED BRIEF', ...briefLines(t.brief));
+  if (t.brief) L.push('', 'ACCEPTED TASK ORGANIZATION', ...briefLines(t.brief));
   if (t.refinement) {
     L.push('', `REFINEMENT #${t.refinement.id} attempt ${t.refinement.attempt} (${t.refinement.status})`);
     for (const q of t.refinement.questions || []) {
@@ -250,7 +250,7 @@ function showTask(t) {
 }
 function briefLines(brief) {
   const c = brief?.content || {};
-  const labels = [['problem', 'problem'], ['purpose', 'purpose'], ['background', 'background'], ['deliverables', 'deliverables'], ['constraints', 'constraints'], ['out_of_scope', 'out of scope'], ['assumptions', 'assumptions'], ['open_questions', 'open questions'], ['next_action', 'next action'], ['criteria', 'criteria']];
+  const labels = [['problem', 'problem'], ['purpose', 'purpose'], ['deliverables', 'deliverables'], ['criteria', 'criteria'], ['background', 'background'], ['constraints', 'constraints'], ['out_of_scope', 'out of scope'], ['assumptions', 'assumptions'], ['open_questions', 'open questions'], ['next_action', 'next action']];
   const lines = [];
   for (const [field, label] of labels) {
     const value = c[field];
@@ -270,7 +270,7 @@ function showRefinement(refinement) {
     if (q.recommendation_reason) L.push(`recommendation: ${q.recommendation_reason}`);
     L.push(`A: ${q.answer_kind ? `${q.answer_kind}${q.selected_option ? ` [${q.selected_option}]` : ''}${q.answer ? ` — ${q.answer}` : ''}` : '(unanswered)'}`);
   }
-  if (refinement.brief) L.push('', 'BRIEF', ...briefLines(refinement.brief));
+  if (refinement.brief) L.push('', 'TASK ORGANIZATION', ...briefLines(refinement.brief));
   return L.join('\n');
 }
 function fmtSize(n) { return n < 1024 ? `${n}B` : n < 1048576 ? `${(n / 1024).toFixed(1)}KB` : `${(n / 1048576).toFixed(1)}MB`; }
@@ -347,12 +347,12 @@ const commands = {
     }
     if (sub === 'edit') {
       const r = await api('PATCH', `/api/refinement-briefs/${idArg(pos[2], 'brief id')}`, { content: jsonInput(pos[3], 'brief JSON') });
-      out(r, () => `brief edited; ${taskLine(r.task)}`);
+      out(r, () => `task organization edited; ${taskLine(r.task)}`);
       return;
     }
     if (sub === 'accept') {
       const r = await api('POST', `/api/refinement-briefs/${idArg(pos[2], 'brief id')}/accept`, {});
-      out(r, () => `brief accepted; ${taskLine(r.task)}${r.added_criteria?.length ? `; added ${r.added_criteria.length} criteria` : ''}`);
+      out(r, () => `task organization accepted; ${taskLine(r.task)}${r.added_criteria?.length ? `; added ${r.added_criteria.length} criteria` : ''}`);
       return;
     }
     if (sub === 'cancel' || sub === 'retry') {
@@ -587,7 +587,7 @@ async function toggleCriteria(done) {
       let msg = e.message;
       if (d.unchecked?.length) msg += '\n  unmet criteria:\n' + d.unchecked.map((c) => `    - ${c.text}`).join('\n');
       if (d.current) msg += `\n  current: ${taskLine(d.current)}`;
-      if (d.missing?.length) msg += '\n  missing brief fields: ' + d.missing.map((x) => x.label || x.field).join(', ');
+      if (d.missing?.length) msg += '\n  missing task organization fields: ' + d.missing.map((x) => x.label || x.field).join(', ');
       if (d.question_ids?.length) msg += `\n  unanswered question ids: ${d.question_ids.join(', ')}`;
       fail(msg, e.exit, { code: d.code, unchecked: d.unchecked, current: d.current, missing: d.missing, blocking: d.blocking, warnings: d.warnings, question_ids: d.question_ids });
     }

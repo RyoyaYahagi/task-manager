@@ -226,6 +226,19 @@ textarea.input { min-height: 72px; resize: vertical; width: 100%; }
 .refinement-progress.error, .refinement-progress.cancelled { background: color-mix(in srgb, var(--danger) 7%, var(--panel-solid)); }
 .refinement-progress-label { font-size: 13px; font-weight: 700; color: var(--text); }
 .refinement-progress p { margin: 0; font-size: 12px; line-height: 1.45; }
+.refinement-timeline { padding: 8px 9px 2px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel-solid); }
+.refinement-timeline-title { color: var(--muted); font-size: 11px; font-weight: 700; margin-bottom: 6px; }
+.refinement-timeline ol { display: flex; flex-direction: column; gap: 6px; list-style: none; margin: 0; padding: 0; }
+.refinement-timeline-item { display: grid; grid-template-columns: 10px minmax(0, 1fr); gap: 7px; align-items: start; position: relative; min-height: 24px; }
+.refinement-timeline-item:not(:last-child)::before { content: ''; position: absolute; left: 4px; top: 10px; bottom: -8px; width: 1px; background: var(--line-strong); }
+.refinement-timeline-dot { width: 9px; height: 9px; margin-top: 3px; border-radius: 50%; background: var(--accent); z-index: 1; }
+.refinement-timeline-item.phase-3 .refinement-timeline-dot { background: var(--warn); }
+.refinement-timeline-item.phase-4 .refinement-timeline-dot { background: var(--ok); }
+.refinement-timeline-item.phase-0 .refinement-timeline-dot { background: var(--danger); }
+.refinement-timeline-item > div { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 6px; align-items: baseline; font-size: 11.5px; }
+.refinement-timeline-item strong { color: var(--muted); font-size: 10.5px; white-space: nowrap; }
+.refinement-timeline-item span { color: var(--text); word-break: break-word; }
+.refinement-timeline-item time { color: var(--faint); white-space: nowrap; font-size: 10px; }
 .refine-question { background: var(--panel-solid); border-radius: 9px; padding: 8px; }
 .refine-question label { display: flex; flex-direction: column; gap: 5px; }
 .question-label { color: var(--text); font-weight: 600; line-height: 1.45; }
@@ -245,6 +258,10 @@ textarea.input { min-height: 72px; resize: vertical; width: 100%; }
 .refine-recommendation span { color: var(--muted); }
 .refine-answer-label { color: var(--muted); font-size: 11px; }
 .brief-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.brief-core-note { padding: 7px 9px; border-radius: 8px; background: color-mix(in srgb, var(--accent) 8%, var(--panel-solid)); color: var(--muted); font-size: 11.5px; line-height: 1.45; }
+.brief-optional { border-top: 1px solid var(--line); padding-top: 8px; }
+.brief-optional summary { cursor: pointer; color: var(--accent); font-size: 12px; font-weight: 700; }
+.brief-optional > p { margin: 6px 0; font-size: 11.5px; }
 .brief-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .brief-field.wide { grid-column: 1 / -1; }
 .brief-field > span { color: var(--muted); font-size: 11.5px; display: flex; align-items: center; gap: 5px; }

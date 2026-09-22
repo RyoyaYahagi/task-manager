@@ -156,6 +156,40 @@ test('pending AI deep dive explains that it is waiting for the external runner',
   assert.match(detail, /外部ランナーが受信するまで待っています/);
 });
 
+test('AI deep dive shows round/question counts and the persisted execution timeline', async () => {
+  const { context, elements } = createLegacyShellContext({
+    status: 'waiting_human',
+    waiting_reason: 'question',
+    agent_mode: 'refine',
+    history: [
+      { id: 1, action: 'task.refine_request', created_at: '2026-09-22T10:00:00.000Z', detail: { refinement: { session_id: 1 } } },
+      { id: 2, action: 'task.start', created_at: '2026-09-22T10:00:01.000Z', detail: { changes: {} } },
+      { id: 3, action: 'task.refine_questions', created_at: '2026-09-22T10:00:02.000Z', detail: { refinement: { session_id: 1, round: 1 } } },
+    ],
+    refinement: {
+      id: 1, attempt: 1, status: 'waiting_user', created_at: '2026-09-22T10:00:00.000Z', questions: [
+        { id: 1, round_no: 1, question: '目的は？', blocking: true, options: [], answer_kind: null },
+        { id: 2, round_no: 1, question: '成果物は？', blocking: true, options: [], answer_kind: null },
+      ], brief: null, updated_at: '',
+    },
+  });
+  vm.runInNewContext(APP_SOURCE, context, { filename: 'public/app.js' });
+  await new Promise((resolve) => setTimeout(resolve, 25));
+
+  const board = elements.get('board');
+  const card = { dataset: { id: '1' }, classList: { add() {}, remove() {} }, closest(selector) { return selector === '.card' ? this : null; } };
+  board.listeners.get('click')({ target: card });
+  await new Promise((resolve) => setTimeout(resolve, 25));
+
+  const detail = elements.get('detail').innerHTML;
+  assert.match(detail, /ラウンド 1\/3/);
+  assert.match(detail, /今回 2問/);
+  assert.match(detail, /累計 2問/);
+  assert.match(detail, /実行履歴/);
+  assert.match(detail, /外部ランナーが実行を開始しました/);
+  assert.match(detail, /質問を提示しました/);
+});
+
 test('AI deep dive questions show choices and the recommended answer', async () => {
   const { context, elements } = createLegacyShellContext({
     status: 'waiting_human',
@@ -260,4 +294,49 @@ test('task detail shows the saved JEV judgment reason and confidence', async () 
   assert.match(detail, /安全性は4%でした/);
   assert.match(detail, /JSON形式/);
   assert.match(detail, /正常/);
+});
+
+test('accepted AI deep dive shows the full accepted brief in addition to criteria', async () => {
+  const { context, elements } = createLegacyShellContext({
+    brief: {
+      id: 4,
+      content: {
+        problem: '制約を含む依頼を実行可能にする',
+        deliverables: ['実行可能なタスク'],
+        criteria: ['人間が結果を確認できる'],
+        constraints: ['既存のAPIを変更しない'],
+      },
+      provenance: { problem: 'user', deliverables: 'inference', criteria: 'user', constraints: 'user' },
+    },
+    refinement: {
+      id: 1,
+      attempt: 1,
+      status: 'accepted',
+      questions: [],
+      brief: {
+        id: 4,
+        content: {
+          problem: '制約を含む依頼を実行可能にする',
+          deliverables: ['実行可能なタスク'],
+          criteria: ['人間が結果を確認できる'],
+          constraints: ['既存のAPIを変更しない'],
+        },
+        provenance: { problem: 'user', deliverables: 'inference', criteria: 'user', constraints: 'user' },
+      },
+      updated_at: '',
+    },
+  });
+  vm.runInNewContext(APP_SOURCE, context, { filename: 'public/app.js' });
+  await new Promise((resolve) => setTimeout(resolve, 25));
+
+  const board = elements.get('board');
+  const card = { dataset: { id: '1' }, classList: { add() {}, remove() {} }, closest(selector) { return selector === '.card' ? this : null; } };
+  board.listeners.get('click')({ target: card });
+  await new Promise((resolve) => setTimeout(resolve, 25));
+
+  const detail = elements.get('detail').innerHTML;
+  assert.match(detail, /採用したタスク整理/);
+  assert.match(detail, /制約/);
+  assert.match(detail, /既存のAPIを変更しない/);
+  assert.match(detail, /完了条件/);
 });

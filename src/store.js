@@ -1027,10 +1027,11 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
       if (session.status !== 'running') throw new StoreError(409, `refinement ${sessionId} is not running`, { code: 'refinement_not_running', current: refinementView(session) });
       const task = getTaskRow(session.task_id);
       assertVersion(task, version ?? session.base_task_version);
-      const brief = domainValue(() => normalizeBrief(content));
+      const rawContent = content && typeof content === 'object' && !Array.isArray(content) ? content : {};
+      const brief = domainValue(() => normalizeBrief(rawContent));
       const assessment = assessBrief(brief);
       if (!assessment.ready) throw new StoreError(422, 'refinement brief is not ready for human review', { code: 'brief_not_ready', missing: assessment.missing, blocking: assessment.blocking, warnings: assessment.warnings });
-      const provenance = normalizeProvenance({}, brief);
+      const provenance = normalizeProvenance(rawContent.provenance, brief);
       const revision = num(get('SELECT COALESCE(MAX(revision), 0) AS m FROM task_briefs WHERE session_id = ?', sessionId).m) + 1;
       run("UPDATE task_briefs SET status = 'superseded', updated_at = ? WHERE session_id = ? AND status = 'draft'", now(), sessionId);
       const ts = now();
@@ -1693,7 +1694,7 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
     t.history = listHistory(id, { limit: 100 });
     const current = currentRefinementSessionRow(id);
     const latest = latestRefinementSessionRow(id);
-    t.refinement = refinementView(current || (latest && ['failed', 'cancelled'].includes(latest.status) ? latest : null));
+    t.refinement = refinementView(current || (latest && ['accepted', 'failed', 'cancelled'].includes(latest.status) ? latest : null));
     t.brief = rowToBrief(get("SELECT * FROM task_briefs WHERE task_id = ? AND status = 'accepted' ORDER BY id DESC LIMIT 1", id));
     t.ai_usage = listAiUsage(id);
     t.ai_cost = summarizeAiUsage(id);

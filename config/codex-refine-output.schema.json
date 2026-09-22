@@ -40,17 +40,29 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["problem", "purpose", "background", "deliverables", "constraints", "out_of_scope", "assumptions", "open_questions", "next_action", "criteria"],
+          "required": [
+            "problem",
+            "purpose",
+            "background",
+            "deliverables",
+            "constraints",
+            "out_of_scope",
+            "assumptions",
+            "open_questions",
+            "next_action",
+            "criteria",
+            "provenance"
+          ],
           "properties": {
-            "problem": { "type": "string" },
-            "purpose": { "type": "string" },
-            "background": { "type": "string" },
-            "deliverables": { "type": "array", "items": { "type": "string" } },
-            "constraints": { "type": "array", "items": { "type": "string" } },
-            "out_of_scope": { "type": "array", "items": { "type": "string" } },
-            "assumptions": { "type": "array", "items": { "type": "string" } },
+            "problem": { "type": ["string", "null"] },
+            "purpose": { "type": ["string", "null"] },
+            "background": { "type": ["string", "null"] },
+            "deliverables": { "type": ["array", "null"], "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+            "constraints": { "type": ["array", "null"], "items": { "type": "string" } },
+            "out_of_scope": { "type": ["array", "null"], "items": { "type": "string" } },
+            "assumptions": { "type": ["array", "null"], "items": { "type": "string" } },
             "open_questions": {
-              "type": "array",
+              "type": ["array", "null"],
               "items": {
                 "type": "object",
                 "additionalProperties": false,
@@ -61,8 +73,36 @@
                 }
               }
             },
-            "next_action": { "type": "string" },
-            "criteria": { "type": "array", "items": { "type": "string" } }
+            "next_action": { "type": ["string", "null"] },
+            "criteria": { "type": ["array", "null"], "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+            "provenance": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "problem",
+                "purpose",
+                "background",
+                "deliverables",
+                "constraints",
+                "out_of_scope",
+                "assumptions",
+                "open_questions",
+                "next_action",
+                "criteria"
+              ],
+              "properties": {
+                "problem": { "enum": ["user", "inference", "assumption", "unresolved", null] },
+                "purpose": { "enum": ["user", "inference", "assumption", "unresolved", null] },
+                "background": { "enum": ["user", "inference", "assumption", "unresolved", null] },
+                "deliverables": { "enum": ["user", "inference", "assumption", "unresolved", null] },
+                "constraints": { "enum": ["user", "inference", "assumption", "unresolved", null] },
+                "out_of_scope": { "enum": ["user", "inference", "assumption", "unresolved", null] },
+                "assumptions": { "enum": ["user", "inference", "assumption", "unresolved", null] },
+                "open_questions": { "enum": ["user", "inference", "assumption", "unresolved", null] },
+                "next_action": { "enum": ["user", "inference", "assumption", "unresolved", null] },
+                "criteria": { "enum": ["user", "inference", "assumption", "unresolved", null] }
+              }
+            }
           }
         },
         { "type": "null" }

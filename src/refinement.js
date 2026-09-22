@@ -6,6 +6,14 @@ export const ANSWER_KINDS = Object.freeze(['answered', 'unknown', 'delegate']);
 export const PROVENANCE_KINDS = Object.freeze(['user', 'inference', 'assumption', 'unresolved', 'human_edited']);
 export const OTHER_OPTION = 'その他';
 
+// The stored brief keeps the historical field names for compatibility. These
+// groups describe which fields are required for a usable brief and which are
+// only added when the task actually needs them.
+export const BRIEF_GOAL_FIELDS = Object.freeze(['problem', 'purpose']);
+export const BRIEF_REQUIRED_FIELDS = Object.freeze(['deliverables', 'criteria']);
+export const BRIEF_OPTIONAL_FIELDS = Object.freeze([
+  'background', 'constraints', 'out_of_scope', 'assumptions', 'open_questions', 'next_action',
+]);
 export const BRIEF_FIELDS = Object.freeze([
   'problem', 'purpose', 'background', 'deliverables', 'constraints',
   'out_of_scope', 'assumptions', 'open_questions', 'next_action', 'criteria',
@@ -124,7 +132,6 @@ export function assessBrief(content) {
   if (!brief.problem && !brief.purpose) missing.push({ field: 'problem', label: '解決したい問題または目的' });
   if (!brief.deliverables.length) missing.push({ field: 'deliverables', label: '成果物' });
   if (!brief.criteria.length) missing.push({ field: 'criteria', label: '完了条件' });
-  if (!brief.next_action) missing.push({ field: 'next_action', label: '次の一手' });
   const blocking = brief.open_questions.filter((item) => item.blocking);
   const warnings = brief.open_questions.filter((item) => !item.blocking);
   return { ready: missing.length === 0 && blocking.length === 0, missing, blocking, warnings, content: brief };

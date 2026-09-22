@@ -1,7 +1,6 @@
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { setTimeout as sleep } from 'node:timers/promises';
 import {
   applyJevRecommendations,
   buildJevReviewQuestions,
@@ -24,7 +23,7 @@ export const CONFIG = Object.freeze({
   codexBin: process.env.CODEX_BIN || 'codex',
   codexModel: process.env.CODEX_MODEL || 'gpt-5.6-luna',
   reasoningEffort: process.env.CODEX_REASONING_EFFORT || 'max',
-  pollMs: Number(process.env.CODEX_RUNNER_POLL_MS || 15000),
+  reconcileMs: Number(process.env.CODEX_RUNNER_RECONCILE_MS || 3 * 60 * 1000),
   codexTimeoutMs: Number(process.env.CODEX_RUNNER_TIMEOUT_MS || 15 * 60 * 1000),
   jevRefineEnabled: process.env.TM_JEV_REFINE_ENABLED !== 'false',
   jevGatewayUrl: process.env.JEV_GATEWAY_URL || 'http://127.0.0.1:4789/v1/systemone',
@@ -36,6 +35,8 @@ export const CONFIG = Object.freeze({
 
 const BRIEF_STRING_FIELDS = ['problem', 'purpose', 'background', 'next_action'];
 const BRIEF_LIST_FIELDS = ['deliverables', 'constraints', 'out_of_scope', 'assumptions', 'criteria'];
+const BRIEF_FIELDS = [...BRIEF_STRING_FIELDS, ...BRIEF_LIST_FIELDS, 'open_questions'];
+const PROVENANCE_KINDS = ['user', 'inference', 'assumption', 'unresolved'];
 const MAX_ERROR = 1000;
 
 function log(message) {
@@ -44,6 +45,149 @@ function log(message) {
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function redactErrorText(value) {
+  return String(value ?? '')
+    .replace(/\bBearer\s+[^\s,]+/gi, 'Bearer <redacted>')
+    .replace(/((?:api[_-]?key|token|secret|password)\s*[:=]\s*)(["']?)[^\s,"']+\2/gi, '$1<redacted>');
+}
+
+export function formatRunnerError(error) {
+  const message = redactErrorText(errorMessage(error));
+  const stderr = redactErrorText(error?.stderr).replace(/\s+/g, ' ').trim();
+  if (!stderr) return message;
+  return `${message}: ${truncate(stderr, 800)}`;
+}
+
+function waitMs(ms, signal) {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    let timer;
+    const finish = () => {
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener('abort', finish);
+      resolve();
+    };
+    timer = setTimeout(finish, ms);
+    signal?.addEventListener('abort', finish, { once: true });
+  });
+}
+
+export function parseSseEventBlock(block) {
+  let eventName = 'message';
+  const data = [];
+  for (const line of String(block || '').split(/\r?\n/)) {
+    if (!line || line.startsWith(':')) continue;
+    if (line.startsWith('event:')) eventName = line.slice('event:'.length).trim() || 'message';
+    else if (line.startsWith('data:')) data.push(line.slice('data:'.length).trimStart());
+  }
+  if (!data.length) return null;
+  try {
+    const payload = JSON.parse(data.join('\n'));
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+    return { ...payload, event: eventName };
+  } catch {
+    return null;
+  }
+}
+
+export function shouldWakeForEvent(event) {
+  const type = event?.type || event?.event;
+  const task = event?.task;
+  const refinement = event?.refinement;
+  return type === 'refinement.updated'
+    && task?.agent_mode === 'refine'
+    && task.status === 'waiting_agent'
+    && ['pending', 'running'].includes(refinement?.status);
+}
+
+async function consumeSseBody(body, { onEvent, signal } = {}) {
+  let buffer = '';
+  const decoder = new TextDecoder();
+  for await (const chunk of body) {
+    buffer += decoder.decode(chunk, { stream: true });
+    let boundary;
+    while ((boundary = buffer.match(/\r?\n\r?\n/))) {
+      const frame = buffer.slice(0, boundary.index);
+      buffer = buffer.slice(boundary.index + boundary[0].length);
+      const event = parseSseEventBlock(frame);
+      if (event) await onEvent(event);
+    }
+    if (signal?.aborted) return;
+  }
+  buffer += decoder.decode();
+  const event = parseSseEventBlock(buffer);
+  if (event && !signal?.aborted) await onEvent(event);
+}
+
+export async function subscribeToEvents({
+  fetchImpl = globalThis.fetch,
+  baseUrl = CONFIG.tmUrl,
+  token = process.env.TM_TOKEN || '',
+  onEvent = () => {},
+  signal,
+  logger = log,
+  sleepImpl = waitMs,
+} = {}) {
+  if (typeof fetchImpl !== 'function') throw new Error('fetch is not available for SSE subscription');
+  const abortSignal = signal || new AbortController().signal;
+  const url = `${String(baseUrl).replace(/\/+$/, '')}/api/events`;
+  let retryMs = 1000;
+
+  while (!abortSignal.aborted) {
+    try {
+      const headers = {
+        'x-actor': CONFIG.actor,
+        'x-actor-name': CONFIG.actorName,
+      };
+      if (token) headers.authorization = `Bearer ${token}`;
+      const response = await fetchImpl(url, { headers, signal: abortSignal });
+      if (!response.ok) throw new Error(`SSE HTTP ${response.status}`);
+      if (!response.body) throw new Error('SSE response has no body');
+      logger('SSE connected');
+      const connectedAt = Date.now();
+      await consumeSseBody(response.body, { onEvent, signal: abortSignal });
+      if (abortSignal.aborted) break;
+      if (Date.now() - connectedAt >= 5000) retryMs = 1000;
+      throw new Error('SSE connection closed');
+    } catch (error) {
+      if (abortSignal.aborted) break;
+      logger(`SSE ${errorMessage(error)}; retrying in ${retryMs}ms`);
+      await sleepImpl(retryMs, abortSignal);
+      retryMs = Math.min(retryMs * 2, 30 * 1000);
+    }
+  }
+}
+
+export function createWakeGate(reconcileMs) {
+  let pending = true;
+  let resolveWaiting = null;
+  let timer = null;
+
+  function wake() {
+    pending = true;
+    if (!resolveWaiting) return;
+    const resolve = resolveWaiting;
+    resolveWaiting = null;
+    if (timer) clearTimeout(timer);
+    timer = null;
+    resolve();
+  }
+
+  async function wait() {
+    if (!pending) {
+      await new Promise((resolve) => {
+        resolveWaiting = resolve;
+        timer = setTimeout(resolve, reconcileMs);
+      });
+      resolveWaiting = null;
+      timer = null;
+    }
+    pending = false;
+  }
+
+  return { wake, wait, hasPending: () => pending };
 }
 
 function truncate(value, max) {
@@ -145,8 +289,28 @@ export function parseCodexUsage(output) {
 }
 
 function cleanList(value, field) {
+  if (value == null || value === '') return [];
   if (!Array.isArray(value)) throw new Error(`${field} must be an array`);
   return value.map((item) => truncate(item, 1000)).filter(Boolean).slice(0, 20);
+}
+
+function cleanProvenance(value, brief) {
+  if (value != null && (typeof value !== 'object' || Array.isArray(value))) throw new Error('brief.provenance must be an object');
+  const source = value || {};
+  const provenance = {};
+  for (const field of BRIEF_FIELDS) {
+    if (source[field] != null) {
+      const kind = String(source[field]);
+      if (!PROVENANCE_KINDS.includes(kind)) throw new Error(`brief.provenance.${field} is invalid`);
+      provenance[field] = kind;
+    }
+  }
+  for (const field of BRIEF_FIELDS) {
+    const current = brief[field];
+    const hasValue = Array.isArray(current) ? current.length > 0 : Boolean(current);
+    if (hasValue && !provenance[field]) provenance[field] = 'inference';
+  }
+  return provenance;
 }
 
 function cleanBrief(value) {
@@ -154,17 +318,17 @@ function cleanBrief(value) {
   const brief = {};
   for (const field of BRIEF_STRING_FIELDS) brief[field] = truncate(value[field], 20000);
   for (const field of BRIEF_LIST_FIELDS) brief[field] = cleanList(value[field], field);
-  if (!Array.isArray(value.open_questions)) throw new Error('open_questions must be an array');
-  brief.open_questions = value.open_questions.map((item) => {
+  const openQuestions = value.open_questions == null || value.open_questions === '' ? [] : value.open_questions;
+  if (!Array.isArray(openQuestions)) throw new Error('open_questions must be an array');
+  brief.open_questions = openQuestions.map((item) => {
     if (!item || typeof item !== 'object' || Array.isArray(item)) throw new Error('open_questions items must be objects');
     return { text: truncate(item.text, 1000), blocking: item.blocking !== false };
   }).filter((item) => item.text).slice(0, 20);
   if (!brief.problem && !brief.purpose) throw new Error('brief needs problem or purpose');
   if (!brief.deliverables.length) throw new Error('brief needs deliverables');
   if (!brief.criteria.length) throw new Error('brief needs criteria');
-  if (!brief.next_action) throw new Error('brief needs next_action');
   if (brief.open_questions.some((item) => item.blocking)) throw new Error('brief has blocking open questions');
-  return brief;
+  return { ...brief, provenance: cleanProvenance(value.provenance, brief) };
 }
 
 export function normalizePlan(value) {
@@ -248,22 +412,28 @@ export function buildPlannerPrompt(task) {
 - シェル、tm、ネットワーク、ファイル操作、ブラウザ、外部サービスを使わないでください。
 - タスクマネージャーやリポジトリを変更しないでください。
 - 推測を事実として断定しないでください。足りない情報は質問するか、深掘り案の assumptions / open_questions に残してください。
+- 元タスクまたはユーザーの回答で確認できない判断を、完了条件・成果物・制約などの確定事項として埋めないでください。
+- ブリーフの最小必須項目は、problemまたはpurposeのどちらか一つ、deliverables、criteriaです。next_actionは実行開始時に役立つ場合だけ記載してください。
+- background、constraints、out_of_scope、assumptions、open_questions、next_actionは、タスクの内容から必要性または根拠がある場合だけ記載してください。空配列・空文字のままで構いません。全項目を埋めるための創作は禁止です。
+- 出力スキーマ上のキーは省略せず、不要な文字列はnull、不要な配列はnullまたは空配列、不要なprovenanceはnullで表現してください。
+- open_questionsには、質問を終えても残った未解決事項だけを記載してください。proposeではblocking=trueを残してはいけません。
 - 回答はJSONオブジェクトを1つだけ返してください。Markdownや説明文は返さないでください。
 
 判断ルール:
 - deep_dive.status が running のときだけ判断してください。
 - grill-me風に、まずTASK_CONTEXTから事実を拾い、タスクを成立させるための「判断の分岐点」を設計ツリーとして整理してください。
 - 今決めないと次の判断に進めない現在の分岐点（frontier）だけを質問してください。後続の細部を先に聞かないでください。
-- 同じラウンドで答えられる現在の分岐点はまとめて質問して構いませんが、質問は必要最小限、最大3件にしてください。
-- 目的、成果物、完了条件、次の一手が足りず、質問で確認する価値がある場合は action=ask。blockingを明示してください。
+- 既存質問の回答を反映したあと、設計ツリーを再評価し、未解決のfrontierが残っていれば次のラウンドで続けてください。ラウンド数は最大3、1ラウンドの質問数は最大3件です。3ラウンド目でblockingな分岐が残る場合は、推測で提案せず action=fail としてください。
+- 問題または目的、成果物、完了条件が足りず、質問で確認する価値がある場合は action=ask。blockingを明示してください。next_actionが未定でも、それだけを理由に質問してはいけません。
 - 判断が必要な質問には、互いに重ならない具体的な選択肢を2〜4個用意してください。optionsが空でもよいのは、自由記述が適切な場合だけです。
 - 選択肢を出した質問では、現在の情報から最も妥当な recommended_option を1つ選び、recommendation_reason に理由を書いてください。おすすめはユーザーの代わりに決定したことを意味しません。
-- 必要な情報が揃っている場合、または既存質問への回答を反映できる場合は action=propose。briefの全項目を埋め、criteriaを1件以上、blocking=trueのopen_questionsは残さないでください。
+- 必要な情報が揃い、blockingなfrontierが残っていない場合だけ action=propose。briefの任意項目は無理に埋めず、criteriaを1件以上、blocking=trueのopen_questionsは残さないでください。
+- proposeでは、brief.provenanceに各項目の根拠を記録してください。元タスクまたはユーザー回答で確認できたものは user、AIが導いたものは inference、作業上の仮置きは assumption、未確定のものは unresolved とします。inference / assumption / unresolved を user と偽らないでください。
 - 判断できない場合は action=fail とし、理由を短く書いてください。
 
 形式:
 { "action": "ask", "questions": [{ "question": "最初に何を優先しますか？", "blocking": true, "options": ["手戻りを減らす", "速度を上げる"], "recommended_option": "手戻りを減らす", "recommendation_reason": "完了条件を先に安定させられるためです。" }] }
-{ "action": "propose", "brief": { "problem": "...", "purpose": "...", "background": "...", "deliverables": ["..."], "constraints": ["..."], "out_of_scope": ["..."], "assumptions": ["..."], "open_questions": [{ "text": "...", "blocking": false }], "next_action": "...", "criteria": ["..."] } }
+{ "action": "propose", "brief": { "problem": "...", "deliverables": ["..."], "criteria": ["..."], "provenance": { "problem": "user", "deliverables": "user", "criteria": "user" } } }
 { "action": "fail", "error": "..." }
 
 TASK_CONTEXT:
@@ -362,7 +532,7 @@ export async function runOnce({ refinementJudge = defaultRefinementJudge } = {})
     plan = codex.plan;
     await recordAiUsage(task, codex.usage_record);
   } catch (error) {
-    await failSession(task.refinement.id, `Codex CLI runner error: ${errorMessage(error)}`);
+    await failSession(task.refinement.id, `Codex CLI runner error: ${formatRunnerError(error)}`);
     return { status: 'failed', taskId: task.id, sessionId: task.refinement.id };
   }
 
@@ -412,13 +582,38 @@ export async function runOnce({ refinementJudge = defaultRefinementJudge } = {})
 
 export async function main() {
   let stopping = false;
-  const stop = () => { stopping = true; };
+  const controller = new AbortController();
+  const wakeGate = createWakeGate(CONFIG.reconcileMs);
+  const stop = () => {
+    if (stopping) return;
+    stopping = true;
+    controller.abort();
+    wakeGate.wake();
+  };
   process.on('SIGTERM', stop);
   process.on('SIGINT', stop);
-  log(`started url=${CONFIG.tmUrl} actor=${CONFIG.actorName} model=${CONFIG.codexModel} jev_refine=${defaultRefinementJudge.info().available ? 'on' : 'off'}`);
-  while (!stopping) {
-    try { await runOnce(); } catch (error) { log(`poll error: ${errorMessage(error)}`); }
-    if (!stopping) await sleep(CONFIG.pollMs);
+  const eventTask = subscribeToEvents({
+    signal: controller.signal,
+    onEvent: (event) => {
+      if (!shouldWakeForEvent(event)) return;
+      log(`event wake task=${event.task.id} session=${event.refinement.id}`);
+      wakeGate.wake();
+    },
+  });
+  eventTask.catch((error) => {
+    if (!controller.signal.aborted) log(`SSE subscriber stopped: ${errorMessage(error)}`);
+  });
+
+  log(`started url=${CONFIG.tmUrl} actor=${CONFIG.actorName} model=${CONFIG.codexModel} jev_refine=${defaultRefinementJudge.info().available ? 'on' : 'off'} reconcile_ms=${CONFIG.reconcileMs}`);
+  try {
+    while (!stopping) {
+      await wakeGate.wait();
+      if (stopping) break;
+      try { await runOnce(); } catch (error) { log(`runner loop error: ${errorMessage(error)}`); }
+    }
+  } finally {
+    stop();
+    await eventTask;
   }
   log('stopped');
 }

@@ -15,7 +15,8 @@ describe('task refinement', () => {
     assert.deepEqual(brief.deliverables, ['仕様書', '実装']);
     assert.equal(assessBrief(brief).ready, true);
     assert.equal(assessBrief({ problem: 'x' }).ready, false);
-    assert.deepEqual(assessBrief({ problem: 'x' }).missing.map((x) => x.field), ['deliverables', 'criteria', 'next_action']);
+    assert.deepEqual(assessBrief({ problem: 'x' }).missing.map((x) => x.field), ['deliverables', 'criteria']);
+    assert.equal(assessBrief({ purpose: '目的', deliverables: ['成果物'], criteria: ['確認できる'] }).ready, true);
     assert.throws(() => normalizeQuestionItems([]), /1\.\.12/);
     assert.throws(() => normalizeAnswers([{ id: 1, kind: 'answered', selected_option: 'その他' }]), /free text/);
   });
@@ -74,11 +75,14 @@ describe('task refinement', () => {
         purpose: '実行可能な依頼にする',
         deliverables: ['タスクブリーフ'],
         criteria: ['ブリーフを承認できる'],
-        next_action: 'ブリーフをレビューする',
         open_questions: [{ text: '期限', blocking: false }],
+        provenance: { problem: 'user', purpose: 'user', deliverables: 'user', criteria: 'user' },
       }, AGENT, { version: answered.task.version });
       assert.equal(proposed.task.waiting_reason, 'review');
       assert.equal(proposed.refinement.status, 'draft');
+      assert.equal(proposed.brief.provenance.problem, 'user');
+      assert.equal(proposed.brief.content.next_action, '');
+      assert.equal(proposed.brief.provenance.open_questions, 'inference');
 
       const edited = store.editRefinementBrief(proposed.brief.id, { purpose: '人間がレビューできる依頼にする' }, HUMAN, { version: proposed.task.version });
       assert.equal(edited.brief.provenance.purpose, 'human_edited');
@@ -91,6 +95,7 @@ describe('task refinement', () => {
       assert.equal(accepted.task.agent_mode, '');
       assert.equal(accepted.added_criteria.length, 1);
       assert.equal(store.getTask(task.id).brief.status, 'accepted');
+      assert.equal(store.getTask(task.id).refinement.status, 'accepted');
       assert.equal(store.listCriteria(task.id)[0].author, 'human');
 
       const acceptanceHistory = store.listHistory(task.id).find((h) => h.action === 'task.refine_accept');

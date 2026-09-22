@@ -178,13 +178,15 @@ AI: refine propose
   → waiting_agent, agent_mode=execute（通常の実装フロー）
 ```
 
-AI深掘りの質問は blocking / non-blocking を持ち、最大 3 ラウンド。AI は grill-me 風に現在の判断の分岐点だけをまとめ、判断質問には `options`、`recommended_option`、`recommendation_reason` を付ける。画面にはクリック式の選択肢と「その他（自由回答）」を表示し、人間は「回答」「不明」「AI に委任」を明示する。選択した値は `selected_option` として保存し、「その他」の場合は自由回答を必須にする。AI は情報を発明せず、推定・仮定・未解決を `provenance` に残す。
+AI深掘りの質問は blocking / non-blocking を持ち、最大 3 ラウンド・1 ラウンド最大 3 問。AI は grill-me 風に設計ツリーを再評価し、未解決の判断分岐（frontier）が残る限り次のラウンドへ進む。ラウンド数を満たすための質問は追加しない。3 ラウンド目でも blocking な分岐が残る場合は、推測でブリーフを作らず失敗として人間に戻す。判断質問には `options`、`recommended_option`、`recommendation_reason` を付ける。画面にはクリック式の選択肢と「その他（自由回答）」を表示し、人間は「回答」「不明」「AI に委任」を明示する。選択した値は `selected_option` として保存し、「その他」の場合は自由回答を必須にする。AI は情報を発明せず、元タスク・ユーザー回答で確認できた項目だけを確定扱いにし、推定・仮定・未解決を項目ごとの `provenance` に残す。任意のブリーフ項目は空欄でもよい。
 
-ブリーフの項目は `problem`, `purpose`, `background`, `deliverables`, `constraints`, `out_of_scope`, `assumptions`, `open_questions`, `next_action`, `criteria`。承認の最低条件は、問題または目的、成果物、完了条件、次の一手が存在し、blocking な未解決事項がないこと。non-blocking の未解決事項は警告として残せる。
+ブリーフは、必須項目と必要時だけ記載する項目を分ける。必須項目は `problem` または `purpose` のどちらか一つ、`deliverables`、`criteria`。`background`、`constraints`、`out_of_scope`、`assumptions`、`open_questions`、`next_action` は、タスクに根拠や必要性がある場合だけ記載する。`next_action` は実行開始の補助情報であり、承認の最低条件にはしない。`open_questions` は深掘り後にも残った未解決事項だけを示し、blocking な項目は承認できない。non-blocking の未解決事項は警告として残せる。保存時は既存データとの互換性のため従来の項目名を維持する。
 
 AI の案は人間が編集・承認するまで正式なタスク記述ではない。承認時に `criteria` だけを人間名義の正式なチェック項目として追加し、AI はその後も人間の完了条件を改変できない。承認済みブリーフは説明本文とは別に保持する。
 
-AI深掘りの質問・提案・失敗・承認は専用の履歴と SSE `refinement.updated`、および通常の task history に残す。キャンセル・失敗後は再試行でき、承認の取り消しはブリーフ・セッション・承認時に追加した条件をまとめて戻す。
+AI深掘りの質問・回答・提案・失敗・承認は専用の履歴と SSE `refinement.updated`、および通常の task history に残す。画面の進捗は現在状態だけでなく、この履歴から段階1〜4のタイムラインとして表示する。キャンセル・失敗後は再試行でき、承認の取り消しはブリーフ・セッション・承認時に追加した条件をまとめて戻す。
+
+AI深掘りの実行キューは、`refinement_sessions` とタスクの `waiting_agent` 状態を永続的なキューとして扱う。「AI深掘り」または回答の送信でキューに登録された直後、サーバーは SSE `refinement.updated` を外部ランナーへ通知する。ランナーは通知を受けて `tm inbox` / `tm ls --status in_progress` を確認し、Codex CLIをWebサーバーのリクエスト内では起動しない。SSEの切断・ランナー再起動・サーバー再起動に備え、ランナー起動時に確認し、既定3分ごと（`CODEX_RUNNER_RECONCILE_MS` で変更可能）にも再確認する。通知は起動のきっかけであり、キューの正しさは永続化されたタスク状態で担保する。
 
 AI深掘りのJEV判定は、Codexが作成した質問または深掘り案を入力にする。質問に選択肢がある場合、JEVは候補から推奨を1つ選び、確信度が閾値未満ならCodexの推奨を変更しない。深掘り案では、JEVが「そのまま提示」「人間に確認」「破棄」のいずれかを判定する。目的・成果物・完了条件を確認できない案は追加質問へ戻し、安全性を確認できない案は表示せず失敗として保留する。JEVが返した採否、routeの確信度、各Noulの確率、判定理由、応答JSONの状態（正常・不完全・不正）と欠落・解釈不能な回答キーは、JEV利用明細のメタデータとして保存し、タスク詳細と `tm show` で確認できる。JEVは自由な質問文やブリーフ本文を生成せず、Codexの生成責務と `tm` の状態変更責務は維持する。JEV の HTTP 呼び出しはローカル Gateway の `JEV_GATEWAY_URL` に送り、TypeSafe の上流認証情報は task-manager のプロセスに渡さない。
 
@@ -290,7 +292,7 @@ AI の「完了」を曖昧にしないため、タスクごとに **完了条�
 | GET | `/api/refinements/:id` | 質問・回答・ブリーフを含むセッション詳細 |
 | POST | `/api/refinements/:id/questions` | AI が質問を提出。`{questions:[{question,blocking?,options?,recommended_option?,recommendation_reason?}], version?}` |
 | POST | `/api/refinements/:id/answers` | 人間が回答。`{answers:[{id,kind,selected_option?,answer}], version?}` |
-| POST | `/api/refinements/:id/brief` | AI がブリーフ案を提出。必須項目がない場合は 422 |
+| POST | `/api/refinements/:id/brief` | AI がブリーフ案を提出。問題または目的、成果物、完了条件がない場合は 422。`content.provenance` で項目ごとの根拠（`user` / `inference` / `assumption` / `unresolved`）を保存 |
 | PATCH | `/api/refinement-briefs/:id` | 人間がブリーフ案を編集 |
 | POST | `/api/refinement-briefs/:id/accept` | 人間が承認し、完了条件を正式化 |
 | POST | `/api/refinements/:id/cancel` `/retry` `/fail` | キャンセル / 再試行 / AI の失敗報告 |

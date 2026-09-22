@@ -51,10 +51,10 @@ The external runner for this flow is Codex CLI with the current setting `gpt-5.6
 
    The task moves to `waiting_human`. Stop work until the human answers.
 5. After the human hands the task back, inspect the structured answers with `tm refine show <session_id>`. For every question, accept an explicit `answered`, `unknown`, or `delegate` result; use `selected_option` when a choice was made; do not reinterpret silence as agreement.
-6. Propose a complete brief. It must include a problem or purpose, deliverables, at least one completion criterion, and a next action. Keep unresolved non-blocking items explicit:
+6. Propose a complete brief. It must include a problem or purpose, deliverables, and at least one completion criterion. Add background, constraints, out-of-scope items, assumptions, unresolved questions, or a next action only when the task provides a concrete reason for them. Keep unresolved non-blocking items explicit:
 
    ```bash
-   tm refine propose <session_id> '{"problem":"…","purpose":"…","background":"…","deliverables":["…"],"constraints":["…"],"out_of_scope":["…"],"assumptions":["…"],"open_questions":[{"text":"…","blocking":false}],"next_action":"…","criteria":["…"]}'
+   tm refine propose <session_id> '{"problem":"…","deliverables":["…"],"criteria":["…"],"provenance":{"problem":"user","deliverables":"user","criteria":"user"}}'
    ```
 
    The task moves to `waiting_human` with a review draft. Never treat a draft as accepted work.

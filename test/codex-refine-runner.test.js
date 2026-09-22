@@ -1,6 +1,37 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildPlannerPrompt, normalizePlan, parseCodexPlan, parseCodexUsage } from '../scripts/codex-refine-runner.js';
+import { readFileSync } from 'node:fs';
+import {
+  buildPlannerPrompt,
+  formatRunnerError,
+  normalizePlan,
+  parseCodexPlan,
+  parseCodexUsage,
+  parseSseEventBlock,
+  shouldWakeForEvent,
+  subscribeToEvents,
+  createWakeGate,
+} from '../scripts/codex-refine-runner.js';
+
+function assertStrictOutputSchema(schema, location = 'root') {
+  if (!schema || typeof schema !== 'object') return;
+  if (schema.type === 'object') {
+    assert.equal(schema.additionalProperties, false, `${location} must disable additional properties`);
+    const propertyNames = Object.keys(schema.properties || {}).sort();
+    const requiredNames = [...(schema.required || [])].sort();
+    assert.deepEqual(requiredNames, propertyNames, `${location} must require every property`);
+  }
+  for (const [index, branch] of (schema.anyOf || []).entries()) {
+    assertStrictOutputSchema(branch, `${location}.anyOf[${index}]`);
+  }
+  for (const [index, branch] of (schema.oneOf || []).entries()) {
+    assertStrictOutputSchema(branch, `${location}.oneOf[${index}]`);
+  }
+  assertStrictOutputSchema(schema.items, `${location}.items`);
+  for (const [name, property] of Object.entries(schema.properties || {})) {
+    assertStrictOutputSchema(property, `${location}.properties.${name}`);
+  }
+}
 
 test('parseCodexPlan extracts the final agent message from Codex JSONL', () => {
   const output = [
@@ -9,6 +40,22 @@ test('parseCodexPlan extracts the final agent message from Codex JSONL', () => {
     JSON.stringify({ type: 'turn.completed' }),
   ].join('\n');
   assert.deepEqual(parseCodexPlan(output), { action: 'ask', questions: [{ question: '目的は？', blocking: true }] });
+});
+
+test('Codex output schema is compatible with strict structured outputs', () => {
+  const schema = JSON.parse(readFileSync(new URL('../config/codex-refine-output.schema.json', import.meta.url), 'utf8'));
+  assertStrictOutputSchema(schema);
+});
+
+test('formatRunnerError preserves child stderr while redacting credential-shaped values', () => {
+  const error = Object.assign(new Error('/home/yappa/.local/bin/codex failed (exit 1)'), {
+    stderr: 'invalid_request_error token=secret-value Authorization: Bearer abc123',
+  });
+  const formatted = formatRunnerError(error);
+  assert.match(formatted, /invalid_request_error/);
+  assert.match(formatted, /token=<redacted>/);
+  assert.match(formatted, /Bearer <redacted>/);
+  assert.doesNotMatch(formatted, /secret-value|abc123/);
 });
 
 test('parseCodexUsage extracts the completed turn usage summary', () => {
@@ -38,6 +85,36 @@ test('normalizePlan keeps a complete brief in the API shape', () => {
   assert.equal(plan.action, 'propose');
   assert.deepEqual(plan.brief.criteria, ['テストが通る']);
   assert.deepEqual(plan.brief.open_questions, [{ text: '任意の確認', blocking: false }]);
+});
+
+test('normalizePlan accepts the minimal brief without optional fields', () => {
+  const plan = normalizePlan({
+    action: 'propose',
+    brief: {
+      purpose: '確認可能な依頼にする',
+      deliverables: ['タスクブリーフ'],
+      criteria: ['人間が内容を確認できる'],
+      provenance: { purpose: 'user', deliverables: 'user', criteria: 'user' },
+    },
+  });
+  assert.equal(plan.brief.next_action, '');
+  assert.deepEqual(plan.brief.background, '');
+  assert.deepEqual(plan.brief.constraints, []);
+  assert.deepEqual(plan.brief.open_questions, []);
+});
+
+test('normalizePlan preserves explicit brief provenance without treating it as content', () => {
+  const plan = normalizePlan({
+    action: 'propose',
+    brief: {
+      problem: '問題', purpose: '', background: '', deliverables: ['成果物'], constraints: [], out_of_scope: [], assumptions: ['仮置き'],
+      open_questions: [], next_action: '次に確認する', criteria: ['条件'],
+      provenance: { problem: 'user', deliverables: 'user', assumptions: 'assumption', next_action: 'inference', criteria: 'user' },
+    },
+  });
+  assert.equal(plan.brief.provenance.problem, 'user');
+  assert.equal(plan.brief.provenance.assumptions, 'assumption');
+  assert.equal(plan.brief.provenance.next_action, 'inference');
 });
 
 test('normalizePlan keeps grill-style choices and recommendation metadata', () => {
@@ -83,5 +160,66 @@ test('buildPlannerPrompt marks board content as untrusted data', () => {
   assert.match(prompt, /選択肢/);
   assert.match(prompt, /おすすめ/);
   assert.match(prompt, /判断の分岐点/);
+  assert.match(prompt, /最大3、1ラウンドの質問数は最大3件/);
+  assert.match(prompt, /provenance/);
+  assert.match(prompt, /推測で提案せず/);
+  assert.match(prompt, /next_actionが未定でも/);
+  assert.match(prompt, /空配列・空文字のまま/);
   assert.match(prompt, /"title": "タイトル"/);
+});
+
+test('parseSseEventBlock parses the event name and JSON data', () => {
+  assert.deepEqual(parseSseEventBlock([
+    'event: refinement.updated',
+    'data: {"type":"refinement.updated","task":{"id":7}}',
+  ].join('\n')), {
+    event: 'refinement.updated',
+    type: 'refinement.updated',
+    task: { id: 7 },
+  });
+  assert.equal(parseSseEventBlock(': keep-alive\n\n'), null);
+});
+
+test('shouldWakeForEvent only wakes for queued AI deep-dive work', () => {
+  const queued = {
+    type: 'refinement.updated',
+    task: { id: 7, agent_mode: 'refine', status: 'waiting_agent' },
+    refinement: { id: 9, status: 'pending' },
+  };
+  assert.equal(shouldWakeForEvent(queued), true);
+  assert.equal(shouldWakeForEvent({ ...queued, refinement: { id: 9, status: 'running' } }), true);
+  assert.equal(shouldWakeForEvent({ ...queued, task: { ...queued.task, status: 'waiting_human' } }), false);
+  assert.equal(shouldWakeForEvent({ ...queued, task: { ...queued.task, agent_mode: 'execute' } }), false);
+  assert.equal(shouldWakeForEvent({ ...queued, type: 'task.updated' }), false);
+});
+
+test('createWakeGate runs immediately, then releases on an event before reconciliation', async () => {
+  const gate = createWakeGate(60 * 1000);
+  await gate.wait();
+  assert.equal(gate.hasPending(), false);
+  const waiting = gate.wait();
+  gate.wake();
+  await waiting;
+  assert.equal(gate.hasPending(), false);
+});
+
+test('subscribeToEvents delivers SSE events until the subscriber is aborted', async () => {
+  const controller = new AbortController();
+  const received = [];
+  async function* body() {
+    yield Buffer.from('event: hello\ndata: {"type":"hello"}\n\n');
+    yield Buffer.from('event: refinement.updated\ndata: {"type":"refinement.updated","task":{"id":7,"agent_mode":"refine","status":"waiting_agent"},"refinement":{"id":9,"status":"pending"}}\n\n');
+  }
+  await subscribeToEvents({
+    baseUrl: 'http://127.0.0.1:3000',
+    signal: controller.signal,
+    fetchImpl: async () => ({ ok: true, status: 200, body: body() }),
+    logger: () => {},
+    onEvent: (event) => {
+      received.push(event);
+      if (shouldWakeForEvent(event)) controller.abort();
+    },
+  });
+  assert.equal(received.length, 2);
+  assert.equal(shouldWakeForEvent(received[1]), true);
 });
