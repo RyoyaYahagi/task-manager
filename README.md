@@ -5,6 +5,7 @@
 
 - レーンは「**誰にボールがあるか**」: 未着手 / 進行中 / **あなたの判断待ち** / **エージェント待ち** / 保留 / 完了
 - **完了条件**（受け入れ条件）をチェックリストで持ち、AI の `tm done` は全条件チェック済みでないと拒否
+- **AI にタスク詳細を詰める**機能。問題・目的・背景・成果物・制約・完了条件・次の一手を、質問 → 人間の回答 → 提案 → 承認の順で構造化
 - 付箋（300 文字）・ファイル添付・HTML プレビュー・サブタスク（1 階層）・プロジェクト・優先度・期限
 - **全操作を「誰が・いつ・何を」で記録**し、どの操作も「元に戻す」で取り消し可能（削除はソフトデリート）
 - JEV による **高確信度のみの自動プロジェクト分け / タグ付け**（既定はオフ。候補は `config/classification.json` で定義）
@@ -64,6 +65,8 @@ Tailscale Serve で HTTPS を公開すると、サービスワーカーが有効
 
 CLI 側: `TM_URL`（既定 `http://127.0.0.1:3000`）, `TM_ACTOR`（`agent` / `human`）, `TM_ACTOR_NAME`, `TM_TOKEN`, `TM_FORMAT=json`。
 
+AI によるタスク精緻化の外部ランナーは Codex CLI と `tm` CLI を組み合わせます。現在の運用設定は Codex CLI の `gpt-5.6-luna`、推論 effort `max` です。task-manager サーバー自身は Codex CLI を起動せず、外部ランナーが `tm` 経由で受信・質問・提案を行います。
+
 ## ローカルデータとGit管理
 
 タスク本文、添付ファイル、SQLite のサイドカーファイル、ログ、エクスポート、バックアップ、`.env`、秘密鍵、Tailscale の端末固有設定は Git に追加しないでください。これらの代表的なファイルやディレクトリは `.gitignore` で除外しています。
@@ -80,6 +83,18 @@ CLI 側: `TM_URL`（既定 `http://127.0.0.1:3000`）, `TM_ACTOR`（`agent` / `h
 4. AI は完了条件をすべて満たすと完了にします（「承認を必要とする」を付けたタスクは「完了報告」として判断待ちに入り、「承認して完了」/「差し戻す」で判断）。
 5. おかしな操作は、詳細の **履歴** タブか上部の **アクティビティ**（「AI の操作のみ」で絞れる）から「元に戻す」。
 
+### AI にタスク詳細を詰める
+
+タイトルだけで目的・成果物・完了条件が曖昧なときは、通常の「エージェントに依頼」の前に **「AIに詰める」**を使います。
+
+1. タスク詳細で「AIに詰める」を押す。
+2. AI が必要な質問だけを最大 3 ラウンドまでまとめて出す。質問は「あなたの判断待ち」に入り、回答・不明・AI への委任を選べる。
+3. AI がタスクブリーフ案を作る。人間は問題、目的、背景、成果物、制約、対象外、前提、未解決事項、次の一手を編集できる。
+4. **「案を承認」**すると、ブリーフ内の完了条件が正式なチェック項目として人間名義で追加され、タスクは未着手に戻る。
+5. その後に「エージェントに依頼」を押すと、通常の実装フローが始まる。
+
+AI の推定・仮定・未解決事項には出所ラベルが付きます。必須の問題または目的、成果物、完了条件、次の一手が揃わない案は承認できません。既存のタスク説明本文はこの機能から変更しません。
+
 キーボード: `/` 検索、`n` 新規、`Esc` 閉じる。PC ではカードをドラッグ＆ドロップで移動できます。スマホでは詳細の「状態」で移動します。
 
 ## 使い方（AI エージェント）
@@ -92,6 +107,11 @@ Claude Code なら **`.claude/skills/task-board/`** がスキルとして読み�
 tm inbox                                  # 依頼されたタスク
 tm show 12                                # 詳細（完了条件・付箋・ファイル・履歴）
 tm start 12                               # 作業開始（作業者を記録）
+tm refine request 12                      # 人間: AI にタスク詳細化を依頼
+tm refine ask 3 '[{"question":"目的は？","blocking":true}]'   # AI: 構造化質問
+tm refine answer 3 '[{"id":1,"kind":"answered","answer":"手戻りを減らす"}]' # 人間: 回答
+tm refine propose 3 '{"problem":"…","deliverables":["…"],"criteria":["…"],"next_action":"…"}' # AI: 提案
+tm refine accept 1                         # 人間: ブリーフを承認
 tm note 12 "進捗メモ"                      # 付箋
 tm ask 12 "A と B どちらにしますか？"        # → あなたの判断待ち（質問）
 tm check 12 1,2                           # 完了条件にチェック
@@ -106,6 +126,7 @@ tm revert <history_id>                    # 自分の操作を取り消す
 ## API
 
 `GET /api/board`, `GET|POST /api/tasks`, `GET|PATCH|DELETE /api/tasks/:id`, `POST /api/tasks/:id/{move,start,ask,handoff,hold,done,approve,archive,unarchive,restore}`,
+`POST /api/tasks/:id/refinements`, `GET /api/tasks/:id/refinements`, `GET /api/refinements/:id`, `POST /api/refinements/:id/{questions,answers,brief,cancel,retry,fail}`, `PATCH /api/refinement-briefs/:id`, `POST /api/refinement-briefs/:id/accept`,
 `/api/tasks/:id/{criteria,notes,files,history}`, `POST /api/tasks/:id/classify`, `PATCH|DELETE /api/{criteria,notes,files}/:id`, `GET|POST /api/projects`, `GET|PATCH /api/settings`, `POST /api/classification/reclassify`,
 `GET /api/activity`, `POST /api/history/:id/revert`, `GET /api/export`, `GET /api/events` (SSE)。
 
@@ -118,6 +139,7 @@ tm revert <history_id>                    # 自分の操作を取り消す
 bin/tm.js          CLI
 src/server.js      HTTP / SSE / 静的配信 / アップロード
 src/store.js       SQLite・バリデーション・履歴・ロールバック
+src/refinement.js  AI タスク詳細化の正規化・完了判定・出所ルール
 src/policy.js      エージェント権限
 config/lanes.json  レーン定義（色・名前・既定で畳むか）
 config/policy.json エージェント権限の既定値

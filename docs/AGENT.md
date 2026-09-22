@@ -34,6 +34,42 @@ A human and I share a kanban board. Lanes mean **who holds the ball**:
    - Refused with exit 3 while any criterion is unchecked. Either meet it and `tm check`, or report partial progress with `tm done <id> "<what is left and why>" --partial` (goes to the human for review).
    - If the task requires review (`needs_review`), it goes to `waiting_human` as a completion report instead of `done`.
 
+### Turning an unclear task into an executable brief
+
+Use this flow when the title / description does not yet make the problem, deliverable, or completion conditions clear. It is separate from the ordinary execution handoff.
+
+The external runner for this flow is Codex CLI with the current setting `gpt-5.6-luna`, reasoning effort `max`. This repository does not spawn Codex CLI; the runner uses `tm` to read and update the board.
+
+1. A human starts the session with `tm --actor human refine request <id>`.
+2. Run `tm inbox`, then `tm start <id>` as usual. The task will have `mode:refine`.
+3. Read the task context with `tm show <id>`. Use only the task title, description, existing criteria, notes, and explicitly attached files. Do not invent missing facts.
+4. Ask only the minimum blocking questions, grouped into one batch (up to three rounds):
+
+   ```bash
+   tm refine ask <session_id> '[{"question":"何を解決したいですか？","blocking":true},{"question":"期限はありますか？","blocking":false}]'
+   ```
+
+   The task moves to `waiting_human`. Stop work until the human answers.
+5. After the human hands the task back, inspect the structured answers with `tm refine show <session_id>`. For every question, accept an explicit `answered`, `unknown`, or `delegate` result; do not reinterpret silence as agreement.
+6. Propose a complete brief. It must include a problem or purpose, deliverables, at least one completion criterion, and a next action. Keep unresolved non-blocking items explicit:
+
+   ```bash
+   tm refine propose <session_id> '{"problem":"…","purpose":"…","background":"…","deliverables":["…"],"constraints":["…"],"out_of_scope":["…"],"assumptions":["…"],"open_questions":[{"text":"…","blocking":false}],"next_action":"…","criteria":["…"]}'
+   ```
+
+   The task moves to `waiting_human` with a review draft. Never treat a draft as accepted work.
+7. The human may edit the draft and then run `tm --actor human refine accept <brief_id>`. Only after acceptance do the criteria become formal checklist items and the task return to `todo`.
+8. To execute the accepted task, the human uses the ordinary handoff. The execution runner then uses `tm start`, work outside the board, `tm check`, and `tm done`.
+
+If the runner cannot continue, report it with `tm refine fail <session_id> "reason"`; do not silently move a refinement task to ordinary execution. A human can retry with `tm --actor human refine retry <session_id>`.
+
+### Refinement safety rules
+
+- `agent_mode=refine` prevents generic `tm ask`, `tm handoff`, `tm done`, and moving to `done` from bypassing the human review step.
+- Existing human-written criteria remain protected. Criteria imported at acceptance are written as human-owned criteria so later agents cannot edit or delete them.
+- Every structured mutation should use the task version returned by the previous command. A 409 means the task changed; re-read with `tm show` and do not overwrite blindly.
+- A brief is a separate structured record; do not replace the task's freeform description with the generated text.
+
 ### Rules
 
 - Never leave a task in `in_progress` when I stop; use `tm ask`, `tm done`, `tm hold <id> "<reason>"` or `tm handoff`.

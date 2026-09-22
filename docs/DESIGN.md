@@ -1,6 +1,6 @@
 # 設計書 v2: 人間 × AI エージェント共同タスクボード
 
-> v1 からの変更: レーン 6 本確定、UI 日本語のみ、ファイル / HTML タブ追加（Project Hub は除外）、
+> v2 からの変更: AI によるタスク詳細化（構造化質問・ブリーフ・人間承認）を追加。v1 からの変更: レーン 6 本確定、UI 日本語のみ、ファイル / HTML タブ追加（Project Hub は除外）、
 > 期限・優先度、プロジェクト、サブタスク、完了条件の構造化、監査ログとロールバック、エージェント権限ポリシーを追加。
 > 決定: AI は完了を確定してよい（ロールバック可能にする）。付箋上限はとりあえず 300 文字。優先度 4 段階、期限は日付のみ。
 
@@ -28,9 +28,9 @@
 ## 3. アーキテクチャ
 
 ```
-  人間 (PC / スマホ)                        AI エージェント (Claude Code など)
-    ブラウザ GUI  public/                       tm CLI  bin/tm.js
-        │  REST + SSE + ファイル upload            │  REST
+  人間 (PC / スマホ)                    外部 AI ランナー (Codex CLI など)
+    ブラウザ GUI  public/                    tm CLI  bin/tm.js
+        │  REST + SSE + ファイル upload         │  REST
         └───────────────────┬──────────────────────┘
                      Node サーバー  src/server.js
                      ・REST API  /api/*
@@ -68,6 +68,7 @@ tasks
   needs_review      INTEGER (0/1)       -- AI の完了報告に人間の承認が必要か (既定 0)
   position          REAL                -- レーン内の並び順
   version           INTEGER             -- 楽観ロック
+  agent_mode          TEXT                -- '' | refine | execute（サーバー管理）
   created_by, created_at, updated_at
   archived_at       TEXT NULL           -- アーカイブ（ボードから消えるが検索可能）
   deleted_at        TEXT NULL           -- ソフトデリート（ロールバック可能）
@@ -92,11 +93,28 @@ history  (監査ログ)
   action TEXT,        -- task.create / task.update / task.move / task.archive / task.delete / task.restore
                       --  criteria.add / criteria.edit / criteria.check / criteria.delete
                       --  note.add / note.edit / note.delete / file.add / file.delete
-                      --  project.* / revert
+                      --  task.refine_* / refinement.brief_edit / project.* / revert
   detail TEXT (JSON), -- 差分 {field: [old, new]} または復元に必要なスナップショット
   reverted_by INTEGER NULL,  -- この操作を取り消した history.id
   reverts INTEGER NULL,      -- この操作が取り消した history.id
   created_at
+
+refinement_sessions  (AI によるタスク詳細化の試行)
+  id, task_id FK, attempt, status,
+  base_task_version, error,
+  created_by, created_by_name, created_at, updated_at, completed_at
+
+refinement_questions  (ラウンドごとの構造化質問と回答)
+  id, session_id FK, round_no, position, question, blocking,
+  answer, answer_kind (answered | unknown | delegate),
+  answered_by, answered_by_name, answered_at, created_at
+
+task_briefs  (AI 案 / 人間編集 / 承認済みの版)
+  id, task_id FK, session_id FK, revision,
+  status (draft | accepted | superseded),
+  content JSON, provenance JSON,
+  created_by, created_by_name, created_at, updated_at,
+  accepted_by, accepted_by_name, accepted_at
 ```
 
 設計上のポイント:
@@ -139,7 +157,38 @@ done  ◀───────────────────────�
 誤りがあれば履歴から「元に戻す」
 ```
 
-### 5.2 完了条件（受け入れ条件）の構造化
+### 5.2 AI によるタスク詳細化
+
+目的は、タイトルや短い依頼をそのまま実装に投げることではなく、**実行可能な依頼へ変換すること**。通常の「エージェントに依頼」とは別の明示操作にする。
+
+```
+人間: 「AIに詰める」
+  todo/on_hold → waiting_agent, agent_mode=refine, session=pending
+AI: tm start
+  → in_progress, session=running
+AI: refine ask
+  → waiting_human(question), session=waiting_user
+人間: refine answer
+  → waiting_agent, session=running
+AI: refine propose
+  → waiting_human(review), session=draft
+人間: draft を編集 / refine accept
+  → todo, agent_mode=''、完了条件を正式チェック項目へ追加
+人間: 「エージェントに依頼」
+  → waiting_agent, agent_mode=execute（通常の実装フロー）
+```
+
+精緻化の質問は blocking / non-blocking を持ち、最大 3 ラウンド。人間は「回答」「不明」「AI に委任」を明示する。AI は情報を発明せず、推定・仮定・未解決を `provenance` に残す。
+
+ブリーフの項目は `problem`, `purpose`, `background`, `deliverables`, `constraints`, `out_of_scope`, `assumptions`, `open_questions`, `next_action`, `criteria`。承認の最低条件は、問題または目的、成果物、完了条件、次の一手が存在し、blocking な未解決事項がないこと。non-blocking の未解決事項は警告として残せる。
+
+AI の案は人間が編集・承認するまで正式なタスク記述ではない。承認時に `criteria` だけを人間名義の正式なチェック項目として追加し、AI はその後も人間の完了条件を改変できない。承認済みブリーフは説明本文とは別に保持する。
+
+精緻化の質問・提案・失敗・承認は専用の履歴と SSE `refinement.updated`、および通常の task history に残す。キャンセル・失敗後は再試行でき、承認の取り消しはブリーフ・セッション・承認時に追加した条件をまとめて戻す。
+
+AI ランナーはサーバーの子プロセスではない。運用では Codex CLI が `gpt-5.6-luna` / reasoning effort `max` で動き、`tm` CLI を通じてこの状態機械を進める。これにより、コード実行やリポジトリ操作の権限境界を task-manager の HTTP サーバーから分離する。
+
+### 5.3 完了条件（受け入れ条件）の構造化
 
 AI の「完了」を曖昧にしないため、タスクごとに **完了条件チェックリスト**を持つ。
 
@@ -154,7 +203,7 @@ AI の「完了」を曖昧にしないため、タスクごとに **完了条�
   `--partial`（未達あり）の場合は常に `waiting_human`（完了報告）になる。
 - 人間が書いた完了条件を AI は削除・改変できない（追加とチェックのみ）。
 
-### 5.3 サブタスク
+### 5.4 サブタスク
 
 - `parent_id` による **1 階層**のサブタスク。サブタスクも通常のタスク（独自のレーン・担当・完了条件を持つ）。
   → 「スキーマ定義は人間の判断待ち、テスト作成は AI が進行中」のような分担が表現できる。
@@ -163,13 +212,13 @@ AI の「完了」を曖昧にしないため、タスクごとに **完了条�
   ヘッダの「サブタスクを畳む」トグルで親だけ表示に切替（スマホでは既定で畳む）。
 - 親を `done` にするとき未完了のサブタスクがあれば警告する（ブロックはしない）。
 
-### 5.4 プロジェクト
+### 5.5 プロジェクト
 
 - `projects` を独立エンティティにする（名前・色・説明）。フリーテキストではなく色付きチップで一目で区別できる。
 - ヘッダに **プロジェクト切替**（すべて / 個別）。ボードは 1 枚で、フィルタで絞る。
 - CLI: `tm projects`, `tm project add <name> [--color]`, タスクには `--project <name>` で指定。
 
-### 5.5 JEV 自動分類
+### 5.6 JEV 自動分類
 
 - `config/classification.json` に、JEV が選べるプロジェクト候補・タグ候補・閾値を定義する。モデルが自由な名前を返しても、候補キーに一致しない値は反映しない。
 - GUI の設定は `settings.classification_mode` に保存し、`off`（既定）または `high_confidence` を選べる。
@@ -192,6 +241,7 @@ AI の「完了」を曖昧にしないため、タスクごとに **完了条�
   | task.delete / task.archive | `deleted_at` / `archived_at` をクリア |
   | note.add / note.edit / note.delete | 削除 / 本文を戻す / 復元 |
   | criteria.* / file.* | 同様 |
+  | task.refine_accept | task の状態、承認済みブリーフ、セッション、承認時に追加した完了条件を競合確認付きでまとめて元に戻す |
 
 - 取り消し自体も `revert` として記録される（`reverts` / `reverted_by` で相互参照）。取り消しの取り消しも可能。
 - **アクティビティビュー**（GUI ヘッダの「アクティビティ」）: 全タスク横断の操作ログ。
@@ -232,6 +282,15 @@ AI の「完了」を曖昧にしないため、タスクごとに **完了条�
 | GET / PATCH / DELETE | `/api/tasks/:id` | 詳細（完了条件・付箋・ファイル・サブタスク・履歴を含む）/ 更新（`version` 不一致で 409）/ ソフトデリート |
 | POST | `/api/tasks/:id/move` | `{status, index, waiting_reason?}` |
 | POST | `/api/tasks/:id/start` | 作業開始（worker 設定、409 制御） |
+| POST | `/api/tasks/:id/refinements` | 人間が AI にタスク詳細化を依頼（`agent_mode=refine`） |
+| GET | `/api/tasks/:id/refinements` | 精緻化セッション履歴 |
+| GET | `/api/refinements/:id` | 質問・回答・ブリーフを含むセッション詳細 |
+| POST | `/api/refinements/:id/questions` | AI が質問を提出。`{questions:[{question,blocking?}], version?}` |
+| POST | `/api/refinements/:id/answers` | 人間が回答。`{answers:[{id,kind,answer}], version?}` |
+| POST | `/api/refinements/:id/brief` | AI がブリーフ案を提出。必須項目がない場合は 422 |
+| PATCH | `/api/refinement-briefs/:id` | 人間がブリーフ案を編集 |
+| POST | `/api/refinement-briefs/:id/accept` | 人間が承認し、完了条件を正式化 |
+| POST | `/api/refinements/:id/cancel` `/retry` `/fail` | キャンセル / 再試行 / AI の失敗報告 |
 | POST | `/api/tasks/:id/done` | 完了報告。`{note, partial?}`。条件未達なら 422 |
 | POST | `/api/tasks/:id/approve` | 人間の承認 → done |
 | POST | `/api/tasks/:id/archive`, `/restore` | アーカイブ / 復元 |
@@ -276,6 +335,13 @@ tm project add <name> [--color #hex]
 # 進める
 tm start <id> [--force]           # → in_progress, worker=自分
 tm ask <id> <question>            # → waiting_human (質問)
+tm refine request <id>             # 人間: AI に詳細化を依頼（human actor）
+tm refine show <session_id>        # 精緻化セッションを見る
+tm refine ask <session_id> '<JSON>' # AI: 質問を提出
+tm refine answer <session_id> '<JSON>' # 人間: 回答 / unknown / delegate
+tm refine propose <session_id> '<JSON>' # AI: ブリーフ案を提出
+tm refine edit <brief_id> '<JSON>'     # 人間: 案を編集
+tm refine accept <brief_id>        # 人間: 承認して完了条件を正式化
 tm check <id> <n[,n..]>           # 完了条件にチェック  / tm uncheck
 tm criteria add <id> <text>       # 完了条件を提案
 tm done <id> <result note> [--partial]   # → waiting_human (完了報告)  ※全条件チェック必須
