@@ -34,6 +34,26 @@ SSE とファイル取得は `?token=<TM_TOKEN>` でも認証できる（`EventS
 | POST | `/api/tasks/:id/approve` | 人間のみ |
 | POST | `/api/tasks/:id/archive` `/unarchive` `/restore` | |
 
+## AI にタスク詳細を詰める
+
+精緻化は通常の execution (`agent_mode=execute`) と分離された `agent_mode=refine` の状態機械。人間が開始し、AI が質問と案を出し、人間が編集・承認する。
+
+| Method | Path | 内容 |
+| --- | --- | --- |
+| POST | `/api/tasks/:id/refinements` | 人間が開始。`{version?}`。タスクを `waiting_agent` にする |
+| GET | `/api/tasks/:id/refinements` | セッション履歴 |
+| GET | `/api/refinements/:id` | セッション、全質問・回答、現在のブリーフ |
+| POST | `/api/refinements/:id/questions` | AI。`{questions:[{question,blocking?}], version?}`。最大 3 ラウンド |
+| POST | `/api/refinements/:id/answers` | 人間。`{answers:[{id,kind,answer}], version?}`。`kind` は `answered` / `unknown` / `delegate` |
+| POST | `/api/refinements/:id/brief` | AI。`{content:{...}, version?}`。問題/目的、成果物、完了条件、次の一手が必要 |
+| PATCH | `/api/refinement-briefs/:id` | 人間。`{content:{...}, version?}`。版を追加して `human_edited` を記録 |
+| POST | `/api/refinement-briefs/:id/accept` | 人間。`{version?}`。完了条件を正式項目へ追加しタスクを `todo` に戻す |
+| POST | `/api/refinements/:id/cancel` | 人間。精緻化をキャンセル |
+| POST | `/api/refinements/:id/retry` | 人間。失敗・キャンセル済みセッションを再試行 |
+| POST | `/api/refinements/:id/fail` | AI。`{error, version?}`。保留にして再試行可能にする |
+
+`GET /api/tasks/:id` には `refinement`（現在の質問 / ドラフト、または直近の失敗）と `brief`（承認済み）が含まれる。更新系はセッションに保存された task version と照合され、409 なら最新タスクを読み直す。
+
 `GET /api/board` と `/api/tasks` のクエリ: `q` `status` `assignee` `project` `tag` `priority`
 `parent` `top_level` `overdue` `include_archived` `include_deleted`。真偽値は `1` / `true`。
 
@@ -103,7 +123,7 @@ es.addEventListener('task.updated', (e) => {
 });
 ```
 
-イベント名は `type` と同じ（`task.created` `task.updated` `task.deleted` `note.created` …）。
+イベント名は `type` と同じ（`task.created` `task.updated` `task.deleted` `refinement.updated` `note.created` …）。
 25 秒ごとに `: ping` のコメント行が流れる。`EventSource` は切断時に自動再接続する。
 
 ## 同時編集の扱い

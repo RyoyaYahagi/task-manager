@@ -40,6 +40,21 @@ PROGRESS
   archive <id> / unarchive <id>
   rm <id>                       soft delete (humans only by default)
 
+REFINE (AI にタスク詳細を詰める)
+  refine request <task_id>      human: start a refinement session
+  refine show <session_id>      show questions, answers, and the current brief
+  refine ask <session_id> <JSON|->
+                                agent: submit [{"question":"...","blocking":true}]
+  refine answer <session_id> <JSON|->
+                                human: submit [{"id":1,"kind":"answered","answer":"..."}]
+  refine propose <session_id> <JSON|->
+                                agent: submit the structured brief
+  refine edit <brief_id> <JSON|->
+                                human: edit the draft brief
+  refine accept <brief_id>       human: accept the draft and import its criteria
+  refine cancel <session_id> / retry <session_id>
+  refine fail <session_id> <message>
+
 NOTES / FILES
   note <id> <text|->            add a note (max 300 chars, "-" reads stdin)
   notes <id>
@@ -134,6 +149,11 @@ function out(data, text) {
   else console.log(typeof text === 'function' ? text() : text ?? JSON.stringify(data, null, 2));
 }
 function readStdin() { return readFileSync(0, 'utf8').replace(/\r?\n$/, ''); }
+function jsonInput(value, label) {
+  const raw = value === '-' ? readStdin() : value;
+  if (!raw) fail(`${label} is required`);
+  try { return JSON.parse(raw); } catch (e) { fail(`${label} is invalid JSON: ${e.message}`); }
+}
 const idArg = (v, what = 'id') => { const n = Number(v); if (!Number.isInteger(n) || n <= 0) fail(`${what} must be a positive integer (got "${v}")`); return n; };
 
 // ---------- formatting ----------
@@ -166,6 +186,7 @@ function taskLine(t) {
   if (t.crit_total) flags.push(`criteria:${t.crit_done}/${t.crit_total}`);
   if (t.sub_total) flags.push(`sub:${t.sub_done}/${t.sub_total}`);
   if (t.note_count) flags.push(`notes:${t.note_count}`);
+  if (t.agent_mode) flags.push(`mode:${t.agent_mode}`);
   if (t.parent_id) flags.push(`parent:#${t.parent_id}`);
   const proj = t.project ? `(${t.project.name}) ` : '';
   return `#${pad(t.id, 4)} ${pad(t.status, 14)} ${pad(ASG[t.assignee], 6)} ${proj}${t.title}${t.tags.length ? '  ' + t.tags.map((x) => '#' + x).join(' ') : ''}${flags.length ? '  ' + flags.join(' ') : ''}`;
@@ -176,19 +197,48 @@ function showTask(t) {
   const L = [];
   L.push(`#${t.id}  ${t.title}`);
   L.push(`status: ${t.status}${t.waiting_reason ? ` (${t.waiting_reason})` : ''}   assignee: ${t.assignee}   priority: ${PRI[t.priority]}   due: ${t.due || '-'}`);
-  L.push(`project: ${t.project?.name || '-'}   tags: ${t.tags.map((x) => '#' + x).join(' ') || '-'}   worker: ${t.worker || '-'}   needs_review: ${t.needs_review ? 'yes' : 'no'}`);
+  L.push(`project: ${t.project?.name || '-'}   tags: ${t.tags.map((x) => '#' + x).join(' ') || '-'}   worker: ${t.worker || '-'}   mode: ${t.agent_mode || '-'}   needs_review: ${t.needs_review ? 'yes' : 'no'}`);
   if (t.parent) L.push(`parent: #${t.parent.id} ${t.parent.title} [${t.parent.status}]`);
   L.push(`created: ${t.created_at} by ${t.created_by}   updated: ${t.updated_at} (${rel(t.updated_at)})   version: ${t.version}${t.archived_at ? '   ARCHIVED' : ''}${t.deleted_at ? '   DELETED' : ''}`);
   if (t.description) { L.push('', 'DESCRIPTION', ...t.description.split('\n').map((x) => '  ' + x)); }
   L.push('', `CRITERIA (${t.criteria.filter((c) => c.done).length}/${t.criteria.length})`);
   if (!t.criteria.length) L.push('  (none — propose some with: tm criteria add <id> "<text>")');
   t.criteria.forEach((c, i) => L.push(`  ${i + 1}. [${c.done ? 'x' : ' '}] ${c.text}   (by ${c.author_name}${c.done ? `, checked by ${c.checked_by_name} ${rel(c.checked_at)}` : ''})`));
+  if (t.brief) L.push('', 'ACCEPTED BRIEF', ...briefLines(t.brief));
+  if (t.refinement) {
+    L.push('', `REFINEMENT #${t.refinement.id} attempt ${t.refinement.attempt} (${t.refinement.status})`);
+    for (const q of t.refinement.questions || []) {
+      L.push(`  Q${q.id} [round ${q.round_no}${q.blocking ? ', blocking' : ''}] ${q.question}`, `      ${q.answer_kind ? `${q.answer_kind}: ${q.answer || '(空)'}` : '(unanswered)'}`);
+    }
+    if (t.refinement.brief) L.push(...briefLines(t.refinement.brief).map((line) => '  ' + line));
+    if (t.refinement.error) L.push(`  error: ${t.refinement.error}`);
+  }
   if (t.subtasks.length) { L.push('', `SUBTASKS (${t.subtasks.filter((s) => s.status === 'done').length}/${t.subtasks.length})`); t.subtasks.forEach((s) => L.push(`  #${s.id} [${s.status}] ${s.title}`)); }
   L.push('', `NOTES (${t.notes.length})`);
   t.notes.forEach((n) => L.push(`  [${n.id}] ${n.author === 'agent' ? '🤖' : '👤'} ${n.author_name} ${n.kind !== 'note' ? `(${n.kind}) ` : ''}${rel(n.created_at)}`, ...n.body.split('\n').map((x) => '      ' + x)));
   if (t.files.length) { L.push('', `FILES (${t.files.length})`); t.files.forEach((f) => L.push(`  [${f.id}] ${f.name}  ${f.mime}  ${fmtSize(f.size)}  by ${f.uploaded_by_name}  ${BASE}/api/files/${f.id}`)); }
   L.push('', `HISTORY (latest ${Math.min(10, t.history.length)} of ${t.history.length})`);
   t.history.slice(0, 10).forEach((h) => L.push('  ' + histLine(h)));
+  return L.join('\n');
+}
+function briefLines(brief) {
+  const c = brief?.content || {};
+  const labels = [['problem', 'problem'], ['purpose', 'purpose'], ['background', 'background'], ['deliverables', 'deliverables'], ['constraints', 'constraints'], ['out_of_scope', 'out of scope'], ['assumptions', 'assumptions'], ['open_questions', 'open questions'], ['next_action', 'next action'], ['criteria', 'criteria']];
+  const lines = [];
+  for (const [field, label] of labels) {
+    const value = c[field];
+    const values = Array.isArray(value) ? value.map((item) => typeof item === 'object' ? `${item.text}${item.blocking === false ? ' (non-blocking)' : ''}` : item) : [value];
+    const present = values.filter((item) => String(item ?? '').trim());
+    if (present.length) lines.push(`${label}: ${present.join(' / ')}`);
+  }
+  if (brief.provenance && Object.keys(brief.provenance).length) lines.push(`provenance: ${Object.entries(brief.provenance).map(([k, v]) => `${k}=${v}`).join(', ')}`);
+  return lines;
+}
+function showRefinement(refinement) {
+  const L = [`refinement #${refinement.id}  task #${refinement.task.id} ${refinement.task.title}`, `status: ${refinement.status}   attempt: ${refinement.attempt}   base version: ${refinement.base_task_version}`];
+  if (refinement.error) L.push(`error: ${refinement.error}`);
+  for (const q of refinement.questions || []) L.push('', `Q${q.id} [round ${q.round_no}${q.blocking ? ', blocking' : ''}] ${q.question}`, `A: ${q.answer_kind ? `${q.answer_kind}${q.answer ? ` — ${q.answer}` : ''}` : '(unanswered)'}`);
+  if (refinement.brief) L.push('', 'BRIEF', ...briefLines(refinement.brief));
   return L.join('\n');
 }
 function fmtSize(n) { return n < 1024 ? `${n}B` : n < 1048576 ? `${(n / 1024).toFixed(1)}KB` : `${(n / 1048576).toFixed(1)}MB`; }
@@ -222,6 +272,52 @@ const commands = {
   async show() {
     const t = await api('GET', `/api/tasks/${idArg(pos[1])}`);
     out(t, () => showTask(t));
+  },
+  async refine() {
+    const sub = pos[1];
+    if (!sub) fail('usage: tm refine request|show|ask|answer|propose|edit|accept|cancel|retry|fail ...');
+    if (sub === 'request') {
+      const id = idArg(pos[2]);
+      const task = await api('GET', `/api/tasks/${id}`);
+      const r = await api('POST', `/api/tasks/${id}/refinements`, { version: task.version });
+      out(r, () => `refinement requested; ${taskLine(r.task)} (session #${r.refinement.id})`);
+      return;
+    }
+    if (sub === 'show') {
+      const r = await api('GET', `/api/refinements/${idArg(pos[2], 'session id')}`);
+      out(r, () => showRefinement(r));
+      return;
+    }
+    if (sub === 'ask' || sub === 'answer' || sub === 'propose') {
+      const sessionId = idArg(pos[2], 'session id');
+      const value = jsonInput(pos[3], `${sub} JSON`);
+      const endpoint = sub === 'ask' ? 'questions' : sub === 'answer' ? 'answers' : 'brief';
+      const body = sub === 'ask' ? { questions: value } : sub === 'answer' ? { answers: value } : { content: value };
+      const r = await api('POST', `/api/refinements/${sessionId}/${endpoint}`, body);
+      out(r, () => `${sub} submitted; ${taskLine(r.task)}`);
+      return;
+    }
+    if (sub === 'edit') {
+      const r = await api('PATCH', `/api/refinement-briefs/${idArg(pos[2], 'brief id')}`, { content: jsonInput(pos[3], 'brief JSON') });
+      out(r, () => `brief edited; ${taskLine(r.task)}`);
+      return;
+    }
+    if (sub === 'accept') {
+      const r = await api('POST', `/api/refinement-briefs/${idArg(pos[2], 'brief id')}/accept`, {});
+      out(r, () => `brief accepted; ${taskLine(r.task)}${r.added_criteria?.length ? `; added ${r.added_criteria.length} criteria` : ''}`);
+      return;
+    }
+    if (sub === 'cancel' || sub === 'retry') {
+      const r = await api('POST', `/api/refinements/${idArg(pos[2], 'session id')}/${sub}`, {});
+      out(r, () => `refinement ${sub}ed; ${taskLine(r.task)}`);
+      return;
+    }
+    if (sub === 'fail') {
+      const r = await api('POST', `/api/refinements/${idArg(pos[2], 'session id')}/fail`, { error: pos.slice(3).join(' ') });
+      out(r, () => `refinement failed; ${taskLine(r.task)}`);
+      return;
+    }
+    fail(`unknown refine subcommand "${sub}"`);
   },
   async lanes() {
     const lanes = await api('GET', '/api/lanes');
@@ -421,7 +517,9 @@ async function toggleCriteria(done) {
       let msg = e.message;
       if (d.unchecked?.length) msg += '\n  unmet criteria:\n' + d.unchecked.map((c) => `    - ${c.text}`).join('\n');
       if (d.current) msg += `\n  current: ${taskLine(d.current)}`;
-      fail(msg, e.exit, { code: d.code, unchecked: d.unchecked, current: d.current });
+      if (d.missing?.length) msg += '\n  missing brief fields: ' + d.missing.map((x) => x.label || x.field).join(', ');
+      if (d.question_ids?.length) msg += `\n  unanswered question ids: ${d.question_ids.join(', ')}`;
+      fail(msg, e.exit, { code: d.code, unchecked: d.unchecked, current: d.current, missing: d.missing, blocking: d.blocking, warnings: d.warnings, question_ids: d.question_ids });
     }
     fail(e.message, 1);
   }

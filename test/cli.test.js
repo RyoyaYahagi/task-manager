@@ -109,6 +109,24 @@ describe('tm cli', () => {
     assert.ok(dump.files.length >= 1);
   });
 
+  test('structured refinement workflow through the CLI', async () => {
+    const task = (await tmj(['add', 'refinement cli task'], { actor: 'human', name: 'ryoya' })).json;
+    const requested = await tmj(['refine', 'request', String(task.id)], { actor: 'human', name: 'ryoya' });
+    assert.equal(requested.code, 0);
+    const sid = requested.json.refinement.id;
+    assert.equal((await tmj(['start', String(task.id)])).json.agent_mode, 'refine');
+    const asked = await tmj(['refine', 'ask', String(sid), JSON.stringify([{ question: '目的は？' }])]);
+    const qid = asked.json.refinement.questions[0].id;
+    const answered = await tmj(['refine', 'answer', String(sid), JSON.stringify([{ id: qid, kind: 'answered', answer: '手戻りを減らす' }])], { actor: 'human', name: 'ryoya' });
+    assert.equal(answered.code, 0);
+    const proposed = await tmj(['refine', 'propose', String(sid), JSON.stringify({ problem: '要件が曖昧', deliverables: ['ブリーフ'], criteria: ['レビューできる'], next_action: '確認する' })]);
+    const accepted = await tmj(['refine', 'accept', String(proposed.json.brief.id)], { actor: 'human', name: 'ryoya' });
+    assert.equal(accepted.code, 0);
+    assert.equal(accepted.json.task.status, 'todo');
+    const shown = await tm(['show', String(task.id)]);
+    assert.match(shown.stdout, /ACCEPTED BRIEF/);
+  });
+
   test('ls filters and lanes/projects', async () => {
     const ls = await tmj(['ls', '--project', 'demo']);
     assert.ok(ls.json.every((t) => t.project.name === 'demo'));

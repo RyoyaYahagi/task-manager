@@ -4,6 +4,16 @@ import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { normalizePolicy, assertAllowed, PolicyError } from './policy.js';
+import {
+  normalizeQuestionItems,
+  normalizeAnswers,
+  normalizeBrief,
+  normalizeProvenance,
+  assessBrief,
+  briefDiff,
+  summarizeQuestions,
+  summarizeBrief,
+} from './refinement.js';
 
 export const ASSIGNEES = ['human', 'agent', 'both'];
 export const ACTOR_KINDS = ['human', 'agent'];
@@ -52,6 +62,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   parent_id INTEGER REFERENCES tasks(id),
   tags TEXT NOT NULL DEFAULT '[]',
   classification_suggestions TEXT NOT NULL DEFAULT '[]',
+  agent_mode TEXT NOT NULL DEFAULT '',
   worker TEXT NOT NULL DEFAULT '',
   needs_review INTEGER NOT NULL DEFAULT 0,
   position REAL NOT NULL DEFAULT 0,
@@ -64,6 +75,54 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status, position);
 CREATE INDEX IF NOT EXISTS tasks_parent ON tasks(parent_id);
+CREATE TABLE IF NOT EXISTS refinement_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id INTEGER NOT NULL REFERENCES tasks(id),
+  attempt INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL,
+  base_task_version INTEGER NOT NULL,
+  error TEXT NOT NULL DEFAULT '',
+  created_by TEXT NOT NULL,
+  created_by_name TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS refinement_sessions_task ON refinement_sessions(task_id, id);
+CREATE INDEX IF NOT EXISTS refinement_sessions_status ON refinement_sessions(status, id);
+CREATE TABLE IF NOT EXISTS refinement_questions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id INTEGER NOT NULL REFERENCES refinement_sessions(id),
+  round_no INTEGER NOT NULL,
+  position REAL NOT NULL DEFAULT 0,
+  question TEXT NOT NULL,
+  blocking INTEGER NOT NULL DEFAULT 1,
+  answer TEXT,
+  answer_kind TEXT,
+  answered_by TEXT,
+  answered_by_name TEXT,
+  answered_at TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS refinement_questions_session ON refinement_questions(session_id, round_no, position, id);
+CREATE TABLE IF NOT EXISTS task_briefs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id INTEGER NOT NULL REFERENCES tasks(id),
+  session_id INTEGER NOT NULL REFERENCES refinement_sessions(id),
+  revision INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL,
+  content TEXT NOT NULL DEFAULT '{}',
+  provenance TEXT NOT NULL DEFAULT '{}',
+  created_by TEXT NOT NULL,
+  created_by_name TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  accepted_by TEXT,
+  accepted_by_name TEXT,
+  accepted_at TEXT
+);
+CREATE INDEX IF NOT EXISTS task_briefs_task ON task_briefs(task_id, id);
+CREATE INDEX IF NOT EXISTS task_briefs_session ON task_briefs(session_id, revision);
 CREATE TABLE IF NOT EXISTS criteria (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   task_id INTEGER NOT NULL REFERENCES tasks(id),
@@ -131,7 +190,7 @@ const TABLE = { task: 'tasks', criteria: 'criteria', note: 'notes', file: 'files
 const JSON_FIELDS = new Set(['tags', 'classification_suggestions']);
 // Fields a revert may write back, per entity.
 const REVERTABLE = {
-  task: new Set(['title', 'description', 'status', 'waiting_reason', 'assignee', 'priority', 'due', 'project_id', 'parent_id', 'tags', 'classification_suggestions', 'worker', 'needs_review', 'position', 'archived_at', 'deleted_at']),
+  task: new Set(['title', 'description', 'status', 'waiting_reason', 'assignee', 'priority', 'due', 'project_id', 'parent_id', 'tags', 'classification_suggestions', 'agent_mode', 'worker', 'needs_review', 'position', 'archived_at', 'deleted_at']),
   criteria: new Set(['text', 'done', 'checked_by', 'checked_by_name', 'checked_at', 'deleted_at', 'position']),
   note: new Set(['body', 'kind', 'deleted_at']),
   file: new Set(['name', 'deleted_at']),
@@ -215,6 +274,9 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
   const taskColumns = db.prepare('PRAGMA table_info(tasks)').all().map((column) => column.name);
   if (!taskColumns.includes('classification_suggestions')) {
     db.exec("ALTER TABLE tasks ADD COLUMN classification_suggestions TEXT NOT NULL DEFAULT '[]'");
+  }
+  if (!taskColumns.includes('agent_mode')) {
+    db.exec("ALTER TABLE tasks ADD COLUMN agent_mode TEXT NOT NULL DEFAULT ''");
   }
 
   const q = (sql) => db.prepare(sql);
@@ -550,6 +612,17 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
     return t;
   }
 
+  // Some structured refinement changes live outside the task row. Bump the task
+  // version anyway so a brief edit participates in the same optimistic lock as
+  // ordinary task edits.
+  function touchTaskVersion(before, actor, action, detail = {}) {
+    run('UPDATE tasks SET version = version + 1, updated_at = ? WHERE id = ?', now(), before.id);
+    const t = getTaskRow(before.id, { includeDeleted: true });
+    log(actor, action, 'task', before.id, before.id, { changes: {}, ...detail });
+    emit('task.updated', { task_id: before.id, task: t, action, changes: {} });
+    return t;
+  }
+
   function assertVersion(task, version) {
     if (version != null && version !== '' && Number(version) !== task.version) {
       throw new StoreError(409, `task ${task.id} was modified by someone else (version is now ${task.version})`, { code: 'version_conflict', current: task });
@@ -561,13 +634,17 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
     return mutate(() => {
       const before = getTaskRow(id);
       assertVersion(before, version);
+      if (patch.agent_mode !== undefined) throw new StoreError(400, 'agent_mode is managed by refinement and execution actions');
       const f = validateTaskFields(patch, actor, { partial: true, existing: before });
       if (classificationSuggestions !== undefined) f.classification_suggestions = cleanClassificationSuggestions(classificationSuggestions);
       if (f.status !== undefined && f.status !== before.status) {
+        if (before.agent_mode === 'refine') throw new StoreError(409, 'use the structured refinement action while a task is being refined', { code: 'refinement_use_structured' });
         if (f.status === 'done') assertAllowed(policy, actor, 'can_close_directly', 'agents cannot close tasks directly');
         f.position = nextPosition(f.status);
         if (f.status !== 'waiting_human' && f.waiting_reason === undefined) f.waiting_reason = '';
         if ((f.status === 'done' || f.status === 'waiting_agent') && f.worker === undefined) f.worker = '';
+        if (f.status === 'waiting_agent') f.agent_mode = 'execute';
+        else if (f.status === 'todo' || f.status === 'on_hold' || f.status === 'done') f.agent_mode = '';
       }
       const changes = diffTask(before, f);
       const historyAction = action || (changes.status ? 'task.move' : 'task.update');
@@ -582,6 +659,9 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
       assertVersion(before, version);
       status ??= before.status;
       if (!laneIds.includes(status)) throw new StoreError(400, `unknown status "${status}"`);
+      if (before.agent_mode === 'refine' && ['in_progress', 'waiting_agent', 'done'].includes(status)) {
+        throw new StoreError(409, 'use the structured refinement action while a task is being refined', { code: 'refinement_use_structured' });
+      }
       if (status === 'done' && before.status !== 'done') assertAllowed(policy, actor, 'can_close_directly', 'agents cannot close tasks directly');
       if (waiting_reason !== undefined && !WAITING_REASONS.includes(waiting_reason)) throw new StoreError(400, 'invalid waiting_reason');
       const others = all('SELECT id FROM tasks WHERE status = ? AND deleted_at IS NULL AND archived_at IS NULL AND id != ? ORDER BY position, id', status, id).map((r) => num(r.id));
@@ -592,6 +672,9 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
       if (status !== 'waiting_human') f.waiting_reason = '';
       else if (waiting_reason !== undefined) f.waiting_reason = waiting_reason;
       if ((status === 'done' || status === 'waiting_agent') && status !== before.status) f.worker = '';
+      if (before.agent_mode === 'refine') f.agent_mode = 'refine';
+      else if (status === 'waiting_agent') f.agent_mode = 'execute';
+      else if (status === 'todo' || status === 'on_hold' || status === 'done') f.agent_mode = '';
       const changes = diffTask(before, f);
       const action = changes.status ? 'task.move' : 'task.reorder';
       return commitTaskChanges(before, changes, actor, action);
@@ -608,7 +691,15 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
       }
       const f = { status: 'in_progress', worker: actor.name, waiting_reason: '' };
       if (before.status !== 'in_progress') f.position = nextPosition('in_progress');
-      return commitTaskChanges(before, diffTask(before, f), actor, 'task.start');
+      if (before.agent_mode === '' && actor.kind === 'agent') f.agent_mode = 'execute';
+      const t = commitTaskChanges(before, diffTask(before, f), actor, 'task.start');
+      if (t.agent_mode === 'refine') {
+        const session = currentRefinementSessionRow(t.id);
+        if (session && (session.status === 'pending' || session.status === 'running')) {
+          updateRefinementSessionRaw(session.id, { status: 'running', base_task_version: t.version, updated_at: now() });
+        }
+      }
+      return t;
     });
   }
 
@@ -619,6 +710,9 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
       const noteRow = note ? addNoteRaw(id, note, actor, kind) : null;
       const f = { status, waiting_reason, position: before.status === status ? before.position : nextPosition(status) };
       if (clearWorker) f.worker = '';
+      if (before.agent_mode === 'refine') f.agent_mode = 'refine';
+      else if (status === 'waiting_agent') f.agent_mode = 'execute';
+      else if (status === 'todo' || status === 'on_hold' || status === 'done') f.agent_mode = '';
       const t = commitTaskChanges(before, diffTask(before, f), actor, action);
       return { task: t, note: noteRow };
     });
@@ -627,10 +721,18 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
   function askTask(id, question, actor, { version } = {}) {
     actor = normalizeActor(actor);
     if (!String(question || '').trim()) throw new StoreError(400, 'a question is required');
+    const before = getTaskRow(id);
+    if (before.agent_mode === 'refine') {
+      throw new StoreError(409, 'refinement questions must use the structured refinement endpoint', { code: 'refinement_use_questions' });
+    }
     return transition(id, actor, { version, status: 'waiting_human', waiting_reason: 'question', note: question, kind: 'question', action: 'task.ask' });
   }
   function handoffTask(id, noteBody, actor, { version } = {}) {
     actor = normalizeActor(actor);
+    const before = getTaskRow(id);
+    if (before.agent_mode === 'refine') {
+      throw new StoreError(409, 'refinement responses must use the structured refinement endpoint', { code: 'refinement_use_answers' });
+    }
     return transition(id, actor, { version, status: 'waiting_agent', waiting_reason: '', note: noteBody, kind: 'note', action: 'task.handoff', clearWorker: true });
   }
   function holdTask(id, noteBody, actor, { version } = {}) {
@@ -645,6 +747,9 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
     return mutate(() => {
       const before = getTaskRow(id);
       assertVersion(before, version);
+      if (before.agent_mode === 'refine') {
+        throw new StoreError(409, 'a refinement must be accepted before the task can be completed', { code: 'refinement_only' });
+      }
       const unchecked = all('SELECT id, text FROM criteria WHERE task_id = ? AND deleted_at IS NULL AND done = 0 ORDER BY position, id', id).map((r) => ({ id: num(r.id), text: r.text }));
       if (unchecked.length && !partial) {
         throw new StoreError(422, `task ${id} has ${unchecked.length} unmet criteria; check them (tm check) or report --partial`, { code: 'criteria_unmet', unchecked });
@@ -653,7 +758,7 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
       if (partial || before.needs_review) target = 'waiting_human';
       else if (actor.kind === 'agent' && !policy.agent.can_close_directly) target = 'waiting_human';
       const noteRow = addNoteRaw(id, body, actor, 'report');
-      const f = { status: target, waiting_reason: target === 'waiting_human' ? 'review' : '', worker: '', position: nextPosition(target) };
+      const f = { status: target, waiting_reason: target === 'waiting_human' ? 'review' : '', worker: '', position: nextPosition(target), agent_mode: target === 'done' ? '' : before.agent_mode };
       const t = commitTaskChanges(before, diffTask(before, f), actor, 'task.done', { partial, unchecked });
       return { task: t, note: noteRow, unchecked };
     });
@@ -665,8 +770,351 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
     return mutate(() => {
       const before = getTaskRow(id);
       assertVersion(before, version);
-      const f = { status: 'done', waiting_reason: '', worker: '', position: nextPosition('done') };
+      if (before.agent_mode === 'refine') {
+        throw new StoreError(409, 'accept the refinement brief before approving the task', { code: 'refinement_use_accept' });
+      }
+      const f = { status: 'done', waiting_reason: '', worker: '', agent_mode: '', position: nextPosition('done') };
       return commitTaskChanges(before, diffTask(before, f), actor, 'task.approve');
+    });
+  }
+
+  // ---------- AI task refinement ----------
+  const ACTIVE_REFINEMENT_STATUSES = ['pending', 'running', 'waiting_user', 'draft'];
+  const BRIEF_STATUSES = ['draft', 'accepted', 'superseded'];
+
+  function domainValue(fn) {
+    try { return fn(); } catch (e) {
+      if (e instanceof StoreError) throw e;
+      throw new StoreError(400, e.message || 'invalid refinement data');
+    }
+  }
+
+  function parseJson(value, fallback) {
+    try { return JSON.parse(value || '{}'); } catch { return fallback; }
+  }
+
+  function rowToRefinementSession(r) {
+    if (!r) return null;
+    return {
+      ...r,
+      id: num(r.id), task_id: num(r.task_id), attempt: num(r.attempt), base_task_version: num(r.base_task_version),
+    };
+  }
+
+  function rowToRefinementQuestion(r) {
+    if (!r) return null;
+    return {
+      ...r,
+      id: num(r.id), session_id: num(r.session_id), round_no: num(r.round_no), position: num(r.position), blocking: !!num(r.blocking),
+    };
+  }
+
+  function rowToBrief(r) {
+    if (!r) return null;
+    return {
+      ...r,
+      id: num(r.id), task_id: num(r.task_id), session_id: num(r.session_id), revision: num(r.revision),
+      content: parseJson(r.content, {}), provenance: parseJson(r.provenance, {}),
+    };
+  }
+
+  function getRefinementSessionRow(id) {
+    const row = rowToRefinementSession(get('SELECT * FROM refinement_sessions WHERE id = ?', id));
+    if (!row) throw new StoreError(404, `refinement ${id} not found`);
+    return row;
+  }
+
+  function currentRefinementSessionRow(taskId) {
+    return rowToRefinementSession(get(`SELECT * FROM refinement_sessions WHERE task_id = ? AND status IN (${ACTIVE_REFINEMENT_STATUSES.map(() => '?').join(',')}) ORDER BY id DESC LIMIT 1`, taskId, ...ACTIVE_REFINEMENT_STATUSES));
+  }
+
+  function latestRefinementSessionRow(taskId) {
+    return rowToRefinementSession(get('SELECT * FROM refinement_sessions WHERE task_id = ? ORDER BY id DESC LIMIT 1', taskId));
+  }
+
+  function listRefinementQuestionRows(sessionId) {
+    return all('SELECT * FROM refinement_questions WHERE session_id = ? ORDER BY round_no, position, id', sessionId).map(rowToRefinementQuestion);
+  }
+
+  function listBriefRows(sessionId) {
+    return all(`SELECT * FROM task_briefs WHERE session_id = ? AND status IN (${BRIEF_STATUSES.map(() => '?').join(',')}) ORDER BY revision, id`, sessionId, ...BRIEF_STATUSES).map(rowToBrief);
+  }
+
+  function currentBriefRow(sessionId) {
+    return rowToBrief(get(`SELECT * FROM task_briefs WHERE session_id = ? AND status IN ('draft', 'accepted') ORDER BY revision DESC, id DESC LIMIT 1`, sessionId));
+  }
+
+  function refinementView(session) {
+    if (!session) return null;
+    return { ...session, questions: listRefinementQuestionRows(session.id), brief: currentBriefRow(session.id), briefs: listBriefRows(session.id) };
+  }
+
+  function getRefinement(id) {
+    const session = getRefinementSessionRow(id);
+    const task = getTaskRow(session.task_id, { includeDeleted: true });
+    return { ...refinementView(session), task: { id: task.id, title: task.title, status: task.status, version: task.version, agent_mode: task.agent_mode } };
+  }
+
+  function listRefinements(taskId) {
+    getTaskRow(taskId, { includeDeleted: true });
+    return all('SELECT * FROM refinement_sessions WHERE task_id = ? ORDER BY id DESC', taskId).map(rowToRefinementSession).map(refinementView);
+  }
+
+  function getAcceptedBrief(taskId) {
+    getTaskRow(taskId, { includeDeleted: true });
+    return rowToBrief(get("SELECT * FROM task_briefs WHERE task_id = ? AND status = 'accepted' ORDER BY id DESC LIMIT 1", taskId));
+  }
+
+  function updateRefinementSessionRaw(id, patch) {
+    const allowed = new Set(['status', 'base_task_version', 'error', 'updated_at', 'completed_at']);
+    const sets = [];
+    const params = [];
+    for (const [key, value] of Object.entries(patch)) {
+      if (!allowed.has(key)) continue;
+      sets.push(`${key} = ?`); params.push(value);
+    }
+    if (!sets.length) return getRefinementSessionRow(id);
+    if (!Object.prototype.hasOwnProperty.call(patch, 'updated_at')) { sets.push('updated_at = ?'); params.push(now()); }
+    params.push(id);
+    run(`UPDATE refinement_sessions SET ${sets.join(', ')} WHERE id = ?`, ...params);
+    return getRefinementSessionRow(id);
+  }
+
+  function createRefinementSessionRaw(task, actor, action = 'task.refine_request') {
+    const attempt = num(get('SELECT COALESCE(MAX(attempt), 0) AS m FROM refinement_sessions WHERE task_id = ?', task.id).m) + 1;
+    const ts = now();
+    const r = run(
+      'INSERT INTO refinement_sessions (task_id, attempt, status, base_task_version, created_by, created_by_name, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)',
+      task.id, attempt, 'pending', task.version, actor.kind, actor.name, ts, ts,
+    );
+    const sessionId = num(r.lastInsertRowid);
+    const f = {
+      status: 'waiting_agent', waiting_reason: '', worker: '', agent_mode: 'refine',
+      position: task.status === 'waiting_agent' ? task.position : nextPosition('waiting_agent'),
+    };
+    const t = commitTaskChanges(task, diffTask(task, f), actor, action, { refinement: { session_id: sessionId, attempt } });
+    updateRefinementSessionRaw(sessionId, { base_task_version: t.version });
+    const session = getRefinementSessionRow(sessionId);
+    emit('refinement.updated', { task_id: task.id, task: t, refinement: refinementView(session) });
+    return { task: t, refinement: refinementView(session) };
+  }
+
+  function requestRefinement(taskId, actor, { version } = {}) {
+    actor = normalizeActor(actor);
+    if (actor.kind !== 'human') throw new PolicyError('only humans can request task refinement');
+    return mutate(() => {
+      const task = getTaskRow(taskId);
+      assertVersion(task, version);
+      if (task.archived_at) throw new StoreError(409, 'archived tasks cannot be refined', { code: 'task_archived' });
+      if (task.status === 'done') throw new StoreError(409, 'completed tasks cannot be refined', { code: 'task_done' });
+      if (!['todo', 'on_hold'].includes(task.status)) throw new StoreError(409, `task ${task.id} must be in todo or on_hold before refinement`, { code: 'invalid_refinement_status', current: task });
+      const active = currentRefinementSessionRow(task.id);
+      if (active) throw new StoreError(409, `task ${task.id} already has an active refinement`, { code: 'refinement_active', current: refinementView(active) });
+      return createRefinementSessionRaw(task, actor);
+    });
+  }
+
+  function submitRefinementQuestions(sessionId, questions, actor, { version } = {}) {
+    actor = normalizeActor(actor);
+    if (actor.kind !== 'agent') throw new PolicyError('only agents can submit refinement questions');
+    return mutate(() => {
+      const session = getRefinementSessionRow(sessionId);
+      if (session.status !== 'running') throw new StoreError(409, `refinement ${sessionId} is not running`, { code: 'refinement_not_running', current: refinementView(session) });
+      const task = getTaskRow(session.task_id);
+      assertVersion(task, version ?? session.base_task_version);
+      const previousRound = num(get('SELECT COALESCE(MAX(round_no), 0) AS m FROM refinement_questions WHERE session_id = ?', sessionId).m);
+      if (previousRound >= 3) throw new StoreError(422, 'refinement question rounds are limited to 3', { code: 'refinement_round_limit' });
+      const items = domainValue(() => normalizeQuestionItems(questions));
+      const round = previousRound + 1;
+      const ts = now();
+      for (const [i, item] of items.entries()) {
+        run('INSERT INTO refinement_questions (session_id, round_no, position, question, blocking, created_at) VALUES (?,?,?,?,?,?)', sessionId, round, i + 1, item.question, item.blocking ? 1 : 0, ts);
+      }
+      addNoteRaw(task.id, summarizeQuestions(items), actor, 'question');
+      const f = { status: 'waiting_human', waiting_reason: 'question', worker: '', agent_mode: 'refine', position: nextPosition('waiting_human') };
+      const t = commitTaskChanges(task, diffTask(task, f), actor, 'task.refine_questions', { refinement: { session_id: sessionId, round } });
+      updateRefinementSessionRaw(sessionId, { status: 'waiting_user', base_task_version: t.version });
+      const updated = getRefinementSessionRow(sessionId);
+      const view = refinementView(updated);
+      emit('refinement.updated', { task_id: task.id, task: t, refinement: view });
+      return { task: t, refinement: view };
+    });
+  }
+
+  function answerRefinement(sessionId, answers, actor, { version } = {}) {
+    actor = normalizeActor(actor);
+    if (actor.kind !== 'human') throw new PolicyError('only humans can answer refinement questions');
+    return mutate(() => {
+      const session = getRefinementSessionRow(sessionId);
+      if (session.status !== 'waiting_user') throw new StoreError(409, `refinement ${sessionId} is not waiting for answers`, { code: 'refinement_not_waiting_user', current: refinementView(session) });
+      const task = getTaskRow(session.task_id);
+      assertVersion(task, version ?? session.base_task_version);
+      const rows = listRefinementQuestionRows(sessionId);
+      const lastRound = Math.max(...rows.map((row) => row.round_no), 0);
+      const pending = rows.filter((row) => row.round_no === lastRound && !row.answer_kind);
+      const values = domainValue(() => normalizeAnswers(answers));
+      const pendingIds = new Set(pending.map((row) => row.id));
+      for (const value of values) {
+        if (!pendingIds.has(value.id)) throw new StoreError(400, `question ${value.id} is not an unanswered question in the latest round`);
+      }
+      const answeredIds = new Set(values.map((value) => value.id));
+      const missing = pending.filter((row) => !answeredIds.has(row.id)).map((row) => row.id);
+      if (missing.length) throw new StoreError(422, 'all current refinement questions must be answered', { code: 'questions_unanswered', question_ids: missing });
+      const ts = now();
+      for (const value of values) {
+        run('UPDATE refinement_questions SET answer = ?, answer_kind = ?, answered_by = ?, answered_by_name = ?, answered_at = ? WHERE id = ?', value.answer || null, value.kind, actor.kind, actor.name, ts, value.id);
+      }
+      const f = { status: 'waiting_agent', waiting_reason: '', worker: '', agent_mode: 'refine', position: nextPosition('waiting_agent') };
+      const t = commitTaskChanges(task, diffTask(task, f), actor, 'task.refine_answers', { refinement: { session_id: sessionId, round: lastRound } });
+      updateRefinementSessionRaw(sessionId, { status: 'running', base_task_version: t.version });
+      const view = refinementView(getRefinementSessionRow(sessionId));
+      emit('refinement.updated', { task_id: task.id, task: t, refinement: view });
+      return { task: t, refinement: view };
+    });
+  }
+
+  function saveRefinementBrief(sessionId, content, actor, { version } = {}) {
+    actor = normalizeActor(actor);
+    if (actor.kind !== 'agent') throw new PolicyError('only agents can propose refinement briefs');
+    return mutate(() => {
+      const session = getRefinementSessionRow(sessionId);
+      if (session.status !== 'running') throw new StoreError(409, `refinement ${sessionId} is not running`, { code: 'refinement_not_running', current: refinementView(session) });
+      const task = getTaskRow(session.task_id);
+      assertVersion(task, version ?? session.base_task_version);
+      const brief = domainValue(() => normalizeBrief(content));
+      const assessment = assessBrief(brief);
+      if (!assessment.ready) throw new StoreError(422, 'refinement brief is not ready for human review', { code: 'brief_not_ready', missing: assessment.missing, blocking: assessment.blocking, warnings: assessment.warnings });
+      const provenance = normalizeProvenance({}, brief);
+      const revision = num(get('SELECT COALESCE(MAX(revision), 0) AS m FROM task_briefs WHERE session_id = ?', sessionId).m) + 1;
+      run("UPDATE task_briefs SET status = 'superseded', updated_at = ? WHERE session_id = ? AND status = 'draft'", now(), sessionId);
+      const ts = now();
+      const r = run('INSERT INTO task_briefs (task_id, session_id, revision, status, content, provenance, created_by, created_by_name, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)', task.id, sessionId, revision, 'draft', JSON.stringify(brief), JSON.stringify(provenance), actor.kind, actor.name, ts, ts);
+      const briefId = num(r.lastInsertRowid);
+      const f = { status: 'waiting_human', waiting_reason: 'review', worker: '', agent_mode: 'refine', position: nextPosition('waiting_human') };
+      const t = commitTaskChanges(task, diffTask(task, f), actor, 'task.refine_propose', { refinement: { session_id: sessionId, brief_id: briefId, revision }, summary: summarizeBrief(brief) });
+      updateRefinementSessionRaw(sessionId, { status: 'draft', base_task_version: t.version });
+      const view = refinementView(getRefinementSessionRow(sessionId));
+      emit('refinement.updated', { task_id: task.id, task: t, refinement: view });
+      return { task: t, refinement: view, brief: rowToBrief(get('SELECT * FROM task_briefs WHERE id = ?', briefId)) };
+    });
+  }
+
+  function editRefinementBrief(briefId, content, actor, { version } = {}) {
+    actor = normalizeActor(actor);
+    if (actor.kind !== 'human') throw new PolicyError('only humans can edit refinement briefs');
+    return mutate(() => {
+      const beforeBrief = rowToBrief(get('SELECT * FROM task_briefs WHERE id = ?', briefId));
+      if (!beforeBrief) throw new StoreError(404, `brief ${briefId} not found`);
+      if (beforeBrief.status !== 'draft') throw new StoreError(409, `brief ${briefId} is not a current draft`, { code: 'brief_not_draft' });
+      const session = getRefinementSessionRow(beforeBrief.session_id);
+      if (session.status !== 'draft') throw new StoreError(409, `refinement ${session.id} is not awaiting brief review`, { code: 'refinement_not_draft' });
+      const task = getTaskRow(beforeBrief.task_id);
+      assertVersion(task, version ?? session.base_task_version);
+      const patch = content && typeof content === 'object' ? content : {};
+      const merged = { ...beforeBrief.content, ...patch };
+      const nextContent = domainValue(() => normalizeBrief(merged));
+      const changes = briefDiff(beforeBrief.content, nextContent);
+      if (!Object.keys(changes).length) return { task, refinement: refinementView(session), brief: beforeBrief };
+      const provenance = { ...beforeBrief.provenance };
+      for (const field of Object.keys(changes)) provenance[field] = 'human_edited';
+      const revision = num(get('SELECT COALESCE(MAX(revision), 0) AS m FROM task_briefs WHERE session_id = ?', session.id).m) + 1;
+      run("UPDATE task_briefs SET status = 'superseded', updated_at = ? WHERE id = ?", now(), briefId);
+      const ts = now();
+      const r = run('INSERT INTO task_briefs (task_id, session_id, revision, status, content, provenance, created_by, created_by_name, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)', task.id, session.id, revision, 'draft', JSON.stringify(nextContent), JSON.stringify(normalizeProvenance(provenance, nextContent)), actor.kind, actor.name, ts, ts);
+      const nextBriefId = num(r.lastInsertRowid);
+      const t = touchTaskVersion(task, actor, 'refinement.brief_edit', { refinement: { session_id: session.id, brief_id: nextBriefId, previous_brief_id: briefId }, brief_changes: changes });
+      updateRefinementSessionRaw(session.id, { base_task_version: t.version });
+      const view = refinementView(getRefinementSessionRow(session.id));
+      emit('refinement.updated', { task_id: task.id, task: t, refinement: view });
+      return { task: t, refinement: view, brief: rowToBrief(get('SELECT * FROM task_briefs WHERE id = ?', nextBriefId)) };
+    });
+  }
+
+  function acceptRefinementBrief(briefId, actor, { version } = {}) {
+    actor = normalizeActor(actor);
+    if (actor.kind !== 'human') throw new PolicyError('only humans can accept refinement briefs');
+    return mutate(() => {
+      const brief = rowToBrief(get('SELECT * FROM task_briefs WHERE id = ?', briefId));
+      if (!brief) throw new StoreError(404, `brief ${briefId} not found`);
+      if (brief.status !== 'draft') throw new StoreError(409, `brief ${briefId} is not a current draft`, { code: 'brief_not_draft' });
+      const session = getRefinementSessionRow(brief.session_id);
+      if (session.status !== 'draft') throw new StoreError(409, `refinement ${session.id} is not awaiting brief review`, { code: 'refinement_not_draft' });
+      const task = getTaskRow(brief.task_id);
+      assertVersion(task, version ?? session.base_task_version);
+      const assessment = assessBrief(brief.content);
+      if (!assessment.ready) throw new StoreError(422, 'refinement brief is not ready for acceptance', { code: 'brief_not_ready', missing: assessment.missing, blocking: assessment.blocking, warnings: assessment.warnings });
+      const previousAccepted = rowToBrief(get("SELECT * FROM task_briefs WHERE task_id = ? AND status = 'accepted' ORDER BY id DESC LIMIT 1", task.id));
+      const addedCriteria = [];
+      const currentCriteria = listCriteria(task.id);
+      const knownCriteria = new Set(currentCriteria.filter((criterion) => !criterion.deleted_at).map((criterion) => criterion.text));
+      for (const text of assessment.content.criteria) {
+        if (!knownCriteria.has(text)) {
+          addedCriteria.push(addCriterionRaw(task.id, text, actor));
+          knownCriteria.add(text);
+        }
+      }
+      run("UPDATE task_briefs SET status = 'superseded', updated_at = ? WHERE task_id = ? AND status = 'accepted'", now(), task.id);
+      run("UPDATE task_briefs SET status = 'accepted', accepted_by = ?, accepted_by_name = ?, accepted_at = ?, updated_at = ? WHERE id = ?", actor.kind, actor.name, now(), now(), brief.id);
+      const f = { status: 'todo', waiting_reason: '', worker: '', agent_mode: '', position: nextPosition('todo') };
+      const detail = {
+        refinement_accept: {
+          session_id: session.id, brief_id: brief.id, previous_accepted_brief_id: previousAccepted?.id || null,
+          added_criteria: addedCriteria.map((criterion) => ({ id: criterion.id, text: criterion.text })),
+        },
+      };
+      const t = commitTaskChanges(task, diffTask(task, f), actor, 'task.refine_accept', detail);
+      updateRefinementSessionRaw(session.id, { status: 'accepted', base_task_version: t.version, completed_at: now() });
+      const view = refinementView(getRefinementSessionRow(session.id));
+      const accepted = rowToBrief(get('SELECT * FROM task_briefs WHERE id = ?', brief.id));
+      emit('refinement.updated', { task_id: task.id, task: t, refinement: view });
+      return { task: t, refinement: view, brief: accepted, added_criteria: addedCriteria };
+    });
+  }
+
+  function cancelRefinement(sessionId, actor, { version } = {}) {
+    actor = normalizeActor(actor);
+    if (actor.kind !== 'human') throw new PolicyError('only humans can cancel refinements');
+    return mutate(() => {
+      const session = getRefinementSessionRow(sessionId);
+      if (!ACTIVE_REFINEMENT_STATUSES.includes(session.status)) throw new StoreError(409, `refinement ${sessionId} is already ${session.status}`, { code: 'refinement_not_active', current: refinementView(session) });
+      const task = getTaskRow(session.task_id);
+      assertVersion(task, version ?? session.base_task_version);
+      const f = { status: 'todo', waiting_reason: '', worker: '', agent_mode: '', position: nextPosition('todo') };
+      const t = commitTaskChanges(task, diffTask(task, f), actor, 'task.refine_cancel', { refinement: { session_id: sessionId } });
+      updateRefinementSessionRaw(sessionId, { status: 'cancelled', base_task_version: t.version, completed_at: now() });
+      const view = refinementView(getRefinementSessionRow(sessionId));
+      emit('refinement.updated', { task_id: task.id, task: t, refinement: view });
+      return { task: t, refinement: view };
+    });
+  }
+
+  function failRefinement(sessionId, error, actor, { version } = {}) {
+    actor = normalizeActor(actor);
+    if (actor.kind !== 'agent') throw new PolicyError('only agents can report refinement failures');
+    return mutate(() => {
+      const session = getRefinementSessionRow(sessionId);
+      if (!ACTIVE_REFINEMENT_STATUSES.includes(session.status)) throw new StoreError(409, `refinement ${sessionId} is not active`, { code: 'refinement_not_active', current: refinementView(session) });
+      const task = getTaskRow(session.task_id);
+      assertVersion(task, version ?? session.base_task_version);
+      const message = String(error || 'agent failed to refine this task').trim().slice(0, 1000);
+      const f = { status: 'on_hold', waiting_reason: '', worker: '', agent_mode: 'refine', position: nextPosition('on_hold') };
+      const t = commitTaskChanges(task, diffTask(task, f), actor, 'task.refine_failed', { refinement: { session_id: sessionId }, error: message });
+      updateRefinementSessionRaw(sessionId, { status: 'failed', error: message, base_task_version: t.version, completed_at: now() });
+      const view = refinementView(getRefinementSessionRow(sessionId));
+      emit('refinement.updated', { task_id: task.id, task: t, refinement: view });
+      return { task: t, refinement: view };
+    });
+  }
+
+  function retryRefinement(sessionId, actor, { version } = {}) {
+    actor = normalizeActor(actor);
+    if (actor.kind !== 'human') throw new PolicyError('only humans can retry refinements');
+    return mutate(() => {
+      const old = getRefinementSessionRow(sessionId);
+      if (!['failed', 'cancelled'].includes(old.status)) throw new StoreError(409, `refinement ${sessionId} cannot be retried from ${old.status}`, { code: 'refinement_not_retryable', current: refinementView(old) });
+      const task = getTaskRow(old.task_id);
+      assertVersion(task, version ?? task.version);
+      return createRefinementSessionRaw(task, actor, 'task.refine_retry');
     });
   }
 
@@ -708,6 +1156,13 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
         run('DELETE FROM files WHERE task_id = ?', id);
         run('DELETE FROM notes WHERE task_id = ?', id);
         run('DELETE FROM criteria WHERE task_id = ?', id);
+        const sessionIds = all('SELECT id FROM refinement_sessions WHERE task_id = ?', id).map((r) => num(r.id));
+        if (sessionIds.length) {
+          const marks = sessionIds.map(() => '?').join(',');
+          run(`DELETE FROM refinement_questions WHERE session_id IN (${marks})`, ...sessionIds);
+          run(`DELETE FROM task_briefs WHERE session_id IN (${marks})`, ...sessionIds);
+        }
+        run('DELETE FROM refinement_sessions WHERE task_id = ?', id);
         run('DELETE FROM history WHERE task_id = ?', id);
         run('UPDATE tasks SET parent_id = NULL WHERE parent_id = ?', id);
         run('DELETE FROM tasks WHERE id = ?', id);
@@ -942,6 +1397,72 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
     return o;
   }
 
+  function revertRefinementBriefEdit(h, actor, { force = false } = {}) {
+    const detail = h.detail.refinement || {};
+    const currentBrief = rowToBrief(get('SELECT * FROM task_briefs WHERE id = ?', detail.brief_id));
+    const previousBrief = rowToBrief(get('SELECT * FROM task_briefs WHERE id = ?', detail.previous_brief_id));
+    if (!force && (!currentBrief || currentBrief.status !== 'draft')) throw new StoreError(409, 'cannot revert: the current brief has changed since; use force', { code: 'revert_conflict', field: 'brief' });
+    if (!force && (!previousBrief || previousBrief.status !== 'superseded')) throw new StoreError(409, 'cannot revert: the previous brief has changed since; use force', { code: 'revert_conflict', field: 'previous_brief' });
+    if (!currentBrief && !previousBrief) throw new StoreError(404, 'brief history no longer exists');
+    if (currentBrief) run("UPDATE task_briefs SET status = 'superseded', updated_at = ? WHERE id = ?", now(), currentBrief.id);
+    if (previousBrief) run("UPDATE task_briefs SET status = 'draft', updated_at = ? WHERE id = ?", now(), previousBrief.id);
+    const beforeTask = getTaskRow(h.task_id);
+    run('UPDATE tasks SET version = version + 1, updated_at = ? WHERE id = ?', now(), h.task_id);
+    const task = getTaskRow(h.task_id, { includeDeleted: true });
+    run('UPDATE refinement_sessions SET base_task_version = ?, updated_at = ? WHERE id = ?', task.version, now(), detail.session_id);
+    const newId = log(actor, 'revert', 'task', h.task_id, h.task_id, {
+      changes: {}, reverted_action: h.action, reverted_actor: h.actor, reverted_actor_name: h.actor_name,
+      refinement_revert: { brief_id: currentBrief?.id || detail.brief_id, restored_previous_brief_id: previousBrief?.id || detail.previous_brief_id },
+    }, h.id);
+    run('UPDATE history SET reverted_by = ? WHERE id = ?', newId, h.id);
+    emit('task.updated', { task_id: h.task_id, task, action: 'revert', changes: {} });
+    emit('refinement.updated', { task_id: h.task_id, task, refinement: refinementView(getRefinementSessionRow(detail.session_id)) });
+    return { history: getHistory(newId), task, previous_task: beforeTask };
+  }
+
+  function revertRefinementAcceptance(h, actor, { force = false } = {}) {
+    const cur = currentEntity('task', h.entity_id);
+    if (!cur) throw new StoreError(404, `task ${h.entity_id} no longer exists`);
+    const changes = {};
+    for (const [k, [oldV, newV]] of Object.entries(h.detail.changes || {})) {
+      if (!REVERTABLE.task.has(k)) continue;
+      if (!force && !eq(cur[k], newV)) {
+        throw new StoreError(409, `cannot revert: task.${k} has changed since (now ${JSON.stringify(cur[k])}, expected ${JSON.stringify(newV)}); use force`, { code: 'revert_conflict', field: k });
+      }
+      if (!eq(cur[k], oldV)) changes[k] = [cur[k], oldV];
+    }
+    const accepted = rowToBrief(get('SELECT * FROM task_briefs WHERE id = ?', h.detail.refinement_accept?.brief_id));
+    if (!force && (!accepted || accepted.status !== 'accepted')) throw new StoreError(409, 'cannot revert: the accepted brief has changed since; use force', { code: 'revert_conflict', field: 'brief' });
+    const addedCriteria = h.detail.refinement_accept?.added_criteria || [];
+    const criteriaToDelete = [];
+    for (const item of addedCriteria) {
+      const criterion = rowToCriterion(get('SELECT * FROM criteria WHERE id = ?', item.id));
+      if (!criterion || criterion.deleted_at) {
+        if (!force) throw new StoreError(409, `cannot revert: criterion ${item.id} has changed since; use force`, { code: 'revert_conflict', field: `criterion:${item.id}` });
+        continue;
+      }
+      if (!force && (criterion.text !== item.text || criterion.done)) throw new StoreError(409, `cannot revert: criterion ${item.id} has changed since; use force`, { code: 'revert_conflict', field: `criterion:${item.id}` });
+      criteriaToDelete.push(criterion);
+    }
+    if (!Object.keys(changes).length && !criteriaToDelete.length && !accepted) throw new StoreError(409, 'nothing to revert', { code: 'noop' });
+    if (Object.keys(changes).length) applyChanges('task', h.entity_id, changes);
+    for (const criterion of criteriaToDelete) run('UPDATE criteria SET deleted_at = ?, updated_at = ? WHERE id = ?', now(), now(), criterion.id);
+    if (accepted) run("UPDATE task_briefs SET status = 'draft', accepted_by = NULL, accepted_by_name = NULL, accepted_at = NULL, updated_at = ? WHERE id = ?", now(), accepted.id);
+    const previousId = h.detail.refinement_accept?.previous_accepted_brief_id;
+    if (previousId) run("UPDATE task_briefs SET status = 'accepted', updated_at = ? WHERE id = ?", now(), previousId);
+    run("UPDATE refinement_sessions SET status = 'draft', completed_at = NULL, updated_at = ?, base_task_version = ? WHERE id = ?", now(), cur.version + (Object.keys(changes).length ? 1 : 0), h.detail.refinement_accept?.session_id);
+    const newId = log(actor, 'revert', 'task', h.entity_id, h.task_id, {
+      changes, reverted_action: h.action, reverted_actor: h.actor, reverted_actor_name: h.actor_name,
+      refinement_revert: { brief_id: accepted?.id || h.detail.refinement_accept?.brief_id, deleted_criteria: criteriaToDelete.map((criterion) => criterion.id), restored_previous_brief_id: previousId || null },
+    }, h.id);
+    run('UPDATE history SET reverted_by = ? WHERE id = ?', newId, h.id);
+    for (const criterion of criteriaToDelete) run("UPDATE history SET reverted_by = ? WHERE entity = 'criteria' AND entity_id = ? AND action = 'criteria.add' AND reverted_by IS NULL", newId, criterion.id);
+    const task = getTaskRow(h.task_id, { includeDeleted: true });
+    emit('task.updated', { task_id: h.task_id, task, action: 'revert', changes });
+    emit('refinement.updated', { task_id: h.task_id, task, refinement: refinementView(getRefinementSessionRow(h.detail.refinement_accept?.session_id)) });
+    return { history: getHistory(newId), task };
+  }
+
   /** Revert one history entry. Returns { history: newEntry, task }. */
   function revert(historyId, actor, { force = false } = {}) {
     actor = normalizeActor(actor);
@@ -952,6 +1473,8 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
         assertAllowed(policy, actor, 'can_revert_others', 'agents can only revert their own actions');
       }
       if (h.action === 'purge') throw new StoreError(400, 'purge cannot be reverted');
+      if (h.action === 'task.refine_accept' && h.detail.refinement_accept) return revertRefinementAcceptance(h, actor, { force });
+      if (h.action === 'refinement.brief_edit') return revertRefinementBriefEdit(h, actor, { force });
       const cur = currentEntity(h.entity, h.entity_id);
       if (!cur) throw new StoreError(404, `${h.entity} ${h.entity_id} no longer exists`);
       let changes;
@@ -999,6 +1522,10 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
     t.subtasks = all(`${TASK_SELECT} WHERE t.parent_id = ? AND t.deleted_at IS NULL ORDER BY t.status, t.position, t.id`, id).map(rowToTask);
     t.parent = t.parent_id ? rowToTask(get(`${TASK_SELECT} WHERE t.id = ?`, t.parent_id)) : null;
     t.history = listHistory(id, { limit: 100 });
+    const current = currentRefinementSessionRow(id);
+    const latest = latestRefinementSessionRow(id);
+    t.refinement = refinementView(current || (latest && ['failed', 'cancelled'].includes(latest.status) ? latest : null));
+    t.brief = rowToBrief(get("SELECT * FROM task_briefs WHERE task_id = ? AND status = 'accepted' ORDER BY id DESC LIMIT 1", id));
     return t;
   }
 
@@ -1019,6 +1546,9 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
       criteria: all('SELECT * FROM criteria ORDER BY id').map(rowToCriterion),
       notes: all('SELECT * FROM notes ORDER BY id').map(rowToNote),
       files: all('SELECT * FROM files ORDER BY id').map(rowToFile),
+      refinement_sessions: all('SELECT * FROM refinement_sessions ORDER BY id').map(rowToRefinementSession),
+      refinement_questions: all('SELECT * FROM refinement_questions ORDER BY id').map(rowToRefinementQuestion),
+      task_briefs: all('SELECT * FROM task_briefs ORDER BY id').map(rowToBrief),
       history: all('SELECT * FROM history ORDER BY id').map(rowToHistory),
     };
   }
@@ -1030,6 +1560,7 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
     listProjects, getProject, createProject, updateProject,
     getSettings, updateSettings,
     listTasks, getTask, createTask, updateTask, moveTask, startTask, askTask, handoffTask, holdTask, doneTask, approveTask, archiveTask, deleteTask, restoreTask, purge,
+    requestRefinement, listRefinements, getRefinement, getAcceptedBrief, submitRefinementQuestions, answerRefinement, saveRefinementBrief, editRefinementBrief, acceptRefinementBrief, cancelRefinement, failRefinement, retryRefinement,
     listCriteria, addCriterion, updateCriterion, deleteCriterion,
     listNotes, addNote, updateNote, deleteNote,
     listFiles, getFile, filePath, addFile, deleteFile,

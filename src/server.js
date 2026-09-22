@@ -40,6 +40,9 @@ export function createApp({ store, token = null, publicDir = PUBLIC_DIR, webhook
     if (!t || ev.type !== 'task.updated') return;
     let text = null;
     if (ev.action === 'task.ask') text = `❓ #${t.id} ${t.title} — AI からの質問があります`;
+    else if (ev.action === 'task.refine_questions') text = `❓ #${t.id} ${t.title} — AI がタスク詳細について質問しています`;
+    else if (ev.action === 'task.refine_propose') text = `📝 #${t.id} ${t.title} — AI がタスク詳細案を作成しました`;
+    else if (ev.action === 'task.refine_failed') text = `⚠️ #${t.id} ${t.title} — AI によるタスク詳細化が失敗しました`;
     else if (ev.action === 'task.done' && t.status === 'waiting_human') text = `📝 #${t.id} ${t.title} — 完了報告の確認をお願いします`;
     else if (ev.action === 'task.done') text = `✅ #${t.id} ${t.title} — AI が完了しました`;
     else if (t.status === 'waiting_human' && ev.action === 'task.move') text = `🔔 #${t.id} ${t.title} — あなたの判断待ちに入りました`;
@@ -77,6 +80,17 @@ export function createApp({ store, token = null, publicDir = PUBLIC_DIR, webhook
   route('DELETE', '/api/tasks/:id', (c) => store.deleteTask(idOf(c.params.id), c.actor));
   route('POST', '/api/tasks/:id/move', (c) => store.moveTask(idOf(c.params.id), c.body, c.actor));
   route('POST', '/api/tasks/:id/start', (c) => store.startTask(idOf(c.params.id), c.actor, { force: bool(c.body.force), version: c.body.version }));
+  route('POST', '/api/tasks/:id/refinements', (c) => store.requestRefinement(idOf(c.params.id), c.actor, { version: c.body.version }));
+  route('GET', '/api/tasks/:id/refinements', (c) => store.listRefinements(idOf(c.params.id)));
+  route('GET', '/api/refinements/:id', (c) => store.getRefinement(idOf(c.params.id)));
+  route('POST', '/api/refinements/:id/questions', (c) => store.submitRefinementQuestions(idOf(c.params.id), c.body.questions, c.actor, { version: c.body.version }));
+  route('POST', '/api/refinements/:id/answers', (c) => store.answerRefinement(idOf(c.params.id), c.body.answers, c.actor, { version: c.body.version }));
+  route('POST', '/api/refinements/:id/brief', (c) => store.saveRefinementBrief(idOf(c.params.id), c.body.content ?? c.body, c.actor, { version: c.body.version }));
+  route('POST', '/api/refinements/:id/cancel', (c) => store.cancelRefinement(idOf(c.params.id), c.actor, { version: c.body.version }));
+  route('POST', '/api/refinements/:id/retry', (c) => store.retryRefinement(idOf(c.params.id), c.actor, { version: c.body.version }));
+  route('POST', '/api/refinements/:id/fail', (c) => store.failRefinement(idOf(c.params.id), c.body.error, c.actor, { version: c.body.version }));
+  route('PATCH', '/api/refinement-briefs/:id', (c) => store.editRefinementBrief(idOf(c.params.id), c.body.content ?? c.body, c.actor, { version: c.body.version }));
+  route('POST', '/api/refinement-briefs/:id/accept', (c) => store.acceptRefinementBrief(idOf(c.params.id), c.actor, { version: c.body.version }));
   route('POST', '/api/tasks/:id/ask', (c) => store.askTask(idOf(c.params.id), c.body.question ?? c.body.note, c.actor, { version: c.body.version }));
   route('POST', '/api/tasks/:id/handoff', (c) => store.handoffTask(idOf(c.params.id), c.body.note, c.actor, { version: c.body.version }));
   route('POST', '/api/tasks/:id/hold', (c) => store.holdTask(idOf(c.params.id), c.body.note, c.actor, { version: c.body.version }));
@@ -274,7 +288,7 @@ export function createApp({ store, token = null, publicDir = PUBLIC_DIR, webhook
       const status = e.status || 500;
       if (status >= 500) logger.error(e);
       const body = { error: e.message || 'internal error', code: e.code || 'error' };
-      for (const k of ['current', 'unchecked', 'rule', 'field']) if (e[k] !== undefined) body[k] = e[k];
+      for (const k of ['current', 'unchecked', 'rule', 'field', 'missing', 'blocking', 'warnings', 'question_ids']) if (e[k] !== undefined) body[k] = e[k];
       if (!res.headersSent) sendJson(res, status, body);
       else res.end();
     });

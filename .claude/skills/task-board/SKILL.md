@@ -31,6 +31,32 @@ tm check <id> 1,2         # 満たした完了条件にチェック
 tm done <id> "<結果>"      # 完了（何をしてどう検証したかを書く）
 ```
 
+## 曖昧なタスクを AI に詰めてもらう
+
+タイトルだけでは実装に入れないときは、通常の `handoff` ではなく専用の精緻化フローを使う。外部ランナーは Codex CLI（現在の設定: `gpt-5.6-luna` / reasoning effort `max`）で、task-manager 自体は Codex CLI を起動しない。
+
+人間が開始する:
+
+```bash
+tm --actor human refine request <id>
+```
+
+AI は `tm inbox` → `tm start` の後、`mode:refine` のタスクとして、既存の説明・条件・付箋・明示された添付だけを根拠に質問する。質問は最大 3 ラウンド、必要なものだけをまとめる:
+
+```bash
+tm refine ask <session_id> '[{"question":"解決したい問題は何ですか？","blocking":true},{"question":"期限はありますか？","blocking":false}]'
+```
+
+人間が回答して再依頼した後、AI は構造化ブリーフを提案する:
+
+```bash
+tm refine propose <session_id> '{"problem":"…","purpose":"…","deliverables":["…"],"criteria":["…"],"next_action":"…"}'
+```
+
+ブリーフは人間が編集・承認するまでドラフト。最低限、問題または目的、成果物、完了条件、次の一手が必要で、blocking な未解決事項があれば提出できない。人間は `tm --actor human refine edit <brief_id> '<JSON>'` で編集し、`tm --actor human refine accept <brief_id>` で承認する。承認された `criteria` だけが正式な人間所有の完了条件に追加され、その後に通常の `tm handoff` を使う。
+
+回答には `kind: "answered" | "unknown" | "delegate"` を付ける。推定・前提・未解決事項はブリーフに明示し、情報を発明しない。失敗時は `tm refine fail <session_id> "理由"`、再試行は人間が `tm --actor human refine retry <session_id>`。
+
 途中で人間の判断が必要になったら、**推測で進めずに投げ返す**:
 
 ```

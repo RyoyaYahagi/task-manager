@@ -10,11 +10,12 @@ const ASSIGNEE_LABEL = { human: '人間', agent: 'AI', both: '両方' };
 const ACTION_LABEL = {
   'task.create': 'タスクを作成', 'task.update': '更新', 'task.move': 'レーン移動', 'task.reorder': '並び替え', 'task.start': '作業開始', 'task.ask': '質問して判断待ちへ',
   'task.handoff': 'エージェントに依頼', 'task.hold': '保留', 'task.done': '完了報告', 'task.approve': '承認して完了', 'task.archive': 'アーカイブ', 'task.unarchive': 'アーカイブ解除', 'task.auto_classify': 'JEV が自動分類', 'task.classification_apply': 'JEVの分類候補を反映',
+  'task.refine_request': 'AIに詰める', 'task.refine_retry': '精緻化を再試行', 'task.refine_questions': '精緻化の質問', 'task.refine_answers': '精緻化の回答', 'task.refine_propose': '精緻化案を作成', 'task.refine_accept': '精緻化案を承認', 'task.refine_cancel': '精緻化をキャンセル', 'task.refine_failed': '精緻化に失敗', 'refinement.brief_edit': '精緻化案を編集',
   'task.delete': '削除', 'task.restore': '復元', 'criteria.add': '完了条件を追加', 'criteria.edit': '完了条件を編集', 'criteria.check': '完了条件をチェック', 'criteria.delete': '完了条件を削除',
   'note.add': '付箋を追加', 'note.edit': '付箋を編集', 'note.delete': '付箋を削除', 'file.add': 'ファイルを添付', 'file.delete': 'ファイルを削除',
   'project.create': 'プロジェクトを作成', 'project.update': 'プロジェクトを更新', revert: '元に戻す', purge: '完全削除',
 };
-const FIELD_LABEL = { title: 'タイトル', description: '説明', status: '状態', waiting_reason: '理由', assignee: '担当', priority: '優先度', due: '期限', project_id: 'プロジェクト', parent_id: '親タスク', tags: 'タグ', classification_suggestions: '分類候補', worker: '作業者', needs_review: '要承認', position: '位置', archived_at: 'アーカイブ', deleted_at: '削除', body: '本文', text: '内容', done: 'チェック', kind: '種別', name: '名前' };
+const FIELD_LABEL = { title: 'タイトル', description: '説明', status: '状態', waiting_reason: '理由', assignee: '担当', priority: '優先度', due: '期限', project_id: 'プロジェクト', parent_id: '親タスク', tags: 'タグ', classification_suggestions: '分類候補', agent_mode: 'AIモード', worker: '作業者', needs_review: '要承認', position: '位置', archived_at: 'アーカイブ', deleted_at: '削除', body: '本文', text: '内容', done: 'チェック', kind: '種別', name: '名前' };
 
 const state = {
   meta: null, lanes: [], board: null, tasks: [], projects: [], tags: [],
@@ -299,6 +300,76 @@ function closeDetail() {
   history.replaceState(null, '', location.pathname);
 }
 
+const BRIEF_FIELDS = [
+  ['problem', '解決したい問題', false], ['purpose', '目的', false], ['background', '背景', true],
+  ['deliverables', '成果物', true], ['constraints', '制約', true], ['out_of_scope', '対象外', true],
+  ['assumptions', '前提', true], ['open_questions', '未解決事項', true], ['next_action', '次の一手', false], ['criteria', '完了条件', true],
+];
+const BRIEF_LIST_FIELDS = new Set(BRIEF_FIELDS.filter(([, , list]) => list).map(([field]) => field));
+function briefFieldText(content, field) {
+  const value = content?.[field];
+  if (!Array.isArray(value)) return String(value || '');
+  return value.map((item) => {
+    if (field !== 'open_questions' || typeof item !== 'object') return String(item ?? '');
+    return `${item.blocking === false ? '[任意] ' : ''}${item.text || ''}`;
+  }).filter(Boolean).join('\n');
+}
+function briefFieldValue(form, field) {
+  const raw = String(form.querySelector(`[data-brief-field="${field}"]`)?.value || '');
+  if (!BRIEF_LIST_FIELDS.has(field)) return raw.trim();
+  return raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
+    if (field !== 'open_questions') return line;
+    const optional = line.startsWith('[任意]');
+    return { text: (optional ? line.slice('[任意]'.length) : line).trim(), blocking: !optional };
+  });
+}
+function collectBriefForm(form) {
+  const content = {};
+  for (const [field] of BRIEF_FIELDS) content[field] = briefFieldValue(form, field);
+  return content;
+}
+function provenanceBadge(value) {
+  if (!value) return '';
+  const labels = { user: '本人', inference: '推定', assumption: '前提', unresolved: '未解決', human_edited: '編集済み' };
+  return `<span class="provenance ${esc(value)}">${esc(labels[value] || value)}</span>`;
+}
+function briefReadOnly(brief, { compact = false } = {}) {
+  const content = brief?.content || {};
+  return `<div class="brief-readonly ${compact ? 'compact' : ''}">${BRIEF_FIELDS.map(([field, label]) => {
+    const value = content[field];
+    const values = Array.isArray(value) ? value.map((item) => typeof item === 'object' ? `${item.text || ''}${item.blocking === false ? '（任意）' : ''}` : item).filter(Boolean) : (value ? [value] : []);
+    if (!values.length) return '';
+    return `<div class="brief-row"><dt>${esc(label)} ${provenanceBadge(brief.provenance?.[field])}</dt><dd>${values.map((item) => `<div>${esc(item)}</div>`).join('')}</dd></div>`;
+  }).join('')}</div>`;
+}
+function renderRefinement(t) {
+  const r = t.refinement;
+  if (!r && !t.brief) return '';
+  let body = '';
+  if (r?.status === 'waiting_user') {
+    const lastRound = Math.max(...(r.questions || []).map((q) => q.round_no), 0);
+    const questions = (r.questions || []).filter((q) => q.round_no === lastRound && !q.answer_kind);
+    body = `<form class="refinement-form" id="refineAnswerForm" data-form="refine-answer">
+      <p class="muted">AI がタスクを実行可能な形にするための質問です。分からない場合は「不明」、AIに任せる場合は「委任」を選べます。</p>
+      ${questions.map((q) => `<div class="refine-question" data-refine-question="${q.id}"><label><span class="question-label">${esc(q.question)}${q.blocking ? ' <b>必須</b>' : ' <span class="muted">任意</span>'}</span><select class="select" data-refine-kind><option value="answered">回答する</option><option value="unknown">不明</option><option value="delegate">AIに委任</option></select><textarea class="input" data-refine-answer rows="2" placeholder="回答を入力…"></textarea></label></div>`).join('')}
+      <button class="btn primary sm" type="submit">回答して AI に戻す</button>
+    </form>`;
+  } else if (r?.status === 'draft' && r.brief) {
+    const c = r.brief.content || {};
+    body = `<form class="refinement-form brief-draft" id="refineBriefForm" data-form="refine-edit" data-brief-id="${r.brief.id}">
+      <p class="muted">AI の提案です。必要な箇所を編集してから承認してください。完了条件は承認時に正式なチェック項目へ追加されます。</p>
+      <div class="brief-grid">${BRIEF_FIELDS.map(([field, label]) => `<label class="brief-field ${BRIEF_LIST_FIELDS.has(field) ? 'wide' : ''}"><span>${esc(label)} ${provenanceBadge(r.brief.provenance?.[field])}</span>${BRIEF_LIST_FIELDS.has(field) ? `<textarea class="input" data-brief-field="${field}" rows="${field === 'criteria' || field === 'deliverables' ? 3 : 2}">${esc(briefFieldText(c, field))}</textarea><small class="muted">1項目1行${field === 'open_questions' ? '。任意の項目は「[任意]」で開始' : ''}</small>` : `<textarea class="input" data-brief-field="${field}" rows="${field === 'problem' || field === 'purpose' || field === 'next_action' ? 2 : 3}">${esc(briefFieldText(c, field))}</textarea>`}</label>`).join('')}</div>
+      <div class="edit-actions"><button class="btn sm" type="submit">案を保存</button><button class="btn ok sm" type="button" data-act="refine-accept">承認して準備完了</button></div>
+    </form>`;
+  } else if (r && (r.status === 'failed' || r.status === 'cancelled')) {
+    body = `<div class="refinement-status ${r.status}"><p>${r.status === 'failed' ? 'AI による詳細化に失敗しました。' : 'この詳細化セッションはキャンセルされています。'}</p>${r.error ? `<div class="error-text">${esc(r.error)}</div>` : ''}<button class="btn sm" data-act="refine-retry">もう一度試す</button></div>`;
+  } else if (r) {
+    body = `<div class="refinement-status"><p>${r.status === 'pending' ? 'AI の受信箱に入りました。' : 'AI がタスクの詳細を整理しています。'}</p></div>`;
+  }
+  if (t.brief && !r?.brief) body += `<div class="accepted-brief"><div class="section-title">採用済みのタスクブリーフ</div>${briefReadOnly(t.brief)}</div>`;
+  return `<section class="refinement-panel"><div class="section-title">${icon('agent')}AIに詰める${r ? ` <span class="count">${esc(r.status)}</span>` : ''}</div>${body}</section>`;
+}
+
 function renderDetail() {
   const t = state.task;
   if (!t) return;
@@ -360,6 +431,7 @@ function renderDetail() {
           </div>`).join('')}</div>` : `<div class="warn-box">完了条件が未設定です。AI が「何をもって完了か」を判断できるように、依頼前に条件を書いておくことをおすすめします。</div>`}
         <form class="add-row" data-form="crit"><input class="input" name="text" placeholder="完了条件を追加（Enter）" maxlength="300" autocomplete="off"><button class="btn" type="submit">${icon('plus')}</button></form>
       </div>
+      ${renderRefinement(t)}
       ${t.parent ? '' : `<div>
         <div class="section-title">${icon('sub')}サブタスク <span class="count">${t.subtasks.filter((s) => s.status === 'done').length}/${t.subtasks.length}</span></div>
         ${t.subtasks.length ? `<div class="sub-list">${t.subtasks.map((s) => `<div class="sub ${s.status === 'done' ? 'done' : ''}" data-open="${s.id}"><span class="lane-dot" style="background:${esc(lane(s.status).color)}"></span><span class="t">#${s.id} ${esc(s.title)}</span><span class="st">${esc(lane(s.status).name)}</span></div>`).join('')}</div>` : ''}
@@ -387,6 +459,10 @@ function renderActions(t) {
       <button data-act="classify">JEVで再分類</button>
       <button data-act="delete" class="danger">削除</button>
     </div></div>`;
+  if (t.refinement?.status === 'waiting_user') return `<button class="btn primary" data-act="refine-answer-submit">${icon('send')}回答して AI に戻す</button><button class="btn" data-act="refine-cancel">キャンセル</button>${menu}`;
+  if (t.refinement?.status === 'draft') return `<button class="btn ok" data-act="refine-accept">${icon('check')}案を承認</button><button class="btn" data-act="refine-cancel">キャンセル</button>${menu}`;
+  if (t.refinement?.status === 'failed' || t.refinement?.status === 'cancelled') return `<button class="btn primary" data-act="refine-retry">${icon('undo')}詳細化を再試行</button>${menu}`;
+  if (t.refinement?.status === 'pending' || t.refinement?.status === 'running') return `<button class="btn" data-act="refine-cancel">詳細化をキャンセル</button>${menu}`;
   if (t.status === 'waiting_human' && t.waiting_reason === 'review') {
     return `<button class="btn ok" data-act="approve">${icon('check')}承認して完了</button><button class="btn warn" data-act="reject">${icon('undo')}差し戻す</button>${menu}`;
   }
@@ -396,7 +472,8 @@ function renderActions(t) {
   if (t.status === 'done') {
     return `<button class="btn" data-act="reopen">${icon('undo')}再開する</button>${menu}`;
   }
-  return `<button class="btn primary" data-act="handoff">${icon('agent')}エージェントに依頼</button><button class="btn" data-act="done">${icon('check')}完了にする</button>${menu}`;
+  const refine = ['todo', 'on_hold'].includes(t.status) ? `<button class="btn primary" data-act="refine-request">${icon('agent')}${t.brief ? 'AIに詰め直す' : 'AIに詰める'}</button>` : '';
+  return `${refine}<button class="btn ${refine ? '' : 'primary'}" data-act="handoff">${icon('agent')}エージェントに依頼</button><button class="btn" data-act="done">${icon('check')}完了にする</button>${menu}`;
 }
 
 function renderNotes(t) {
@@ -547,6 +624,38 @@ async function act(name, target) {
         scheduleDetail(); loadBoard();
         break;
       }
+      case 'refine-request': {
+        await api('POST', `/api/tasks/${id}/refinements`, { version: t.version });
+        state.noteDraft = ''; toast('AI にタスク詳細化を依頼しました', 'ok'); scheduleDetail(); loadBoard();
+        break;
+      }
+      case 'refine-answer-submit': {
+        const form = $('#refineAnswerForm');
+        if (!form) return;
+        form.requestSubmit();
+        break;
+      }
+      case 'refine-accept': {
+        const form = $('#refineBriefForm');
+        let version = t.version;
+        if (form) {
+          const saved = await api('PATCH', `/api/refinement-briefs/${form.dataset.briefId}`, { content: collectBriefForm(form), version });
+          version = saved.task.version;
+        }
+        await api('POST', `/api/refinement-briefs/${t.refinement.brief.id}/accept`, { version });
+        toast('タスク詳細案を承認しました', 'ok'); scheduleDetail(); loadBoard();
+        break;
+      }
+      case 'refine-cancel': {
+        await api('POST', `/api/refinements/${t.refinement.id}/cancel`, { version: t.version });
+        toast('タスク詳細化をキャンセルしました', 'ok'); scheduleDetail(); loadBoard();
+        break;
+      }
+      case 'refine-retry': {
+        await api('POST', `/api/refinements/${t.refinement.id}/retry`, { version: t.version });
+        toast('タスク詳細化を再試行します', 'ok'); scheduleDetail(); loadBoard();
+        break;
+      }
       case 'handoff': case 'answer': {
         if (name === 'answer' && !draft) { toast('付箋に回答を書いてから押してください', 'error'); ni?.focus(); return; }
         if (name === 'handoff' && !t.criteria.length && !confirm('完了条件が未設定です。このまま AI に依頼しますか？')) return;
@@ -627,6 +736,15 @@ $('#detail').addEventListener('submit', async (e) => {
     } else if (form.dataset.form === 'sub') {
       const title = form.title.value.trim(); if (!title) return;
       await api('POST', '/api/tasks', { title, parent_id: t.id, project: t.project?.name || null, status: 'todo' }); form.title.value = ''; scheduleDetail();
+    } else if (form.dataset.form === 'refine-answer') {
+      const answers = $$('.refine-question', form).map((row) => ({
+        id: Number(row.dataset.refineQuestion), kind: $('[data-refine-kind]', row).value, answer: $('[data-refine-answer]', row).value.trim(),
+      }));
+      await api('POST', `/api/refinements/${t.refinement.id}/answers`, { answers, version: t.version });
+      toast('回答を AI に戻しました', 'ok'); scheduleDetail(); loadBoard();
+    } else if (form.dataset.form === 'refine-edit') {
+      await api('PATCH', `/api/refinement-briefs/${form.dataset.briefId}`, { content: collectBriefForm(form), version: t.version });
+      toast('タスク詳細案を保存しました', 'ok'); scheduleDetail();
     }
   } catch (err) { handleError(err); }
 });
@@ -826,9 +944,11 @@ function connect() {
     scheduleBoard();
     if (state.selectedId && (ev.task_id === state.selectedId || ev.task?.parent_id === state.selectedId || state.task?.parent_id === ev.task_id)) scheduleDetail();
     if (ev.type === 'task.updated' && ev.action === 'task.ask' && ev.task) toast(`#${ev.task.id} AI から質問があります`);
+    if (ev.type === 'task.updated' && ev.action === 'task.refine_questions' && ev.task) toast(`#${ev.task.id} AI がタスク詳細について質問しています`);
+    if (ev.type === 'task.updated' && ev.action === 'task.refine_propose' && ev.task) toast(`#${ev.task.id} AI がタスク詳細案を作成しました`, 'ok');
     if (ev.type === 'task.updated' && ev.action === 'task.done' && ev.task) toast(`#${ev.task.id} ${ev.task.status === 'done' ? 'AI が完了しました' : 'AI の完了報告が届きました'}`, 'ok');
   };
-  for (const t of ['task.created', 'task.updated', 'task.deleted', 'task.purged', 'note.created', 'note.updated', 'note.deleted', 'criteria.created', 'criteria.updated', 'criteria.deleted', 'file.created', 'file.updated', 'file.deleted', 'project.created', 'project.updated', 'settings.updated']) es.addEventListener(t, onEvent);
+  for (const t of ['task.created', 'task.updated', 'task.deleted', 'task.purged', 'refinement.updated', 'note.created', 'note.updated', 'note.deleted', 'criteria.created', 'criteria.updated', 'criteria.deleted', 'file.created', 'file.updated', 'file.deleted', 'project.created', 'project.updated', 'settings.updated']) es.addEventListener(t, onEvent);
 }
 
 // The board still needs a live connection for API/SSE data, but the app shell

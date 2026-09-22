@@ -116,6 +116,28 @@ tm archive <id> / tm unarchive <id>
 tm rm <id>                 # ソフトデリート。既定では人間のみ（agent は exit 2）
 ```
 
+## AI にタスク詳細を詰める
+
+通常の実装依頼の前に、問題・目的・成果物・制約・完了条件を構造化するためのフロー。人間が開始し、AI が質問と案を出し、人間が編集・承認する。
+
+```bash
+tm --actor human refine request <task_id>
+tm refine show <session_id>
+tm refine ask <session_id> '[{"question":"目的は？","blocking":true}]'
+tm --actor human refine answer <session_id> '[{"id":1,"kind":"answered","answer":"手戻りを減らす"}]'
+tm refine propose <session_id> '{"problem":"要件が曖昧","deliverables":["実装"],"criteria":["テストが通る"],"next_action":"仕様を確認する"}'
+tm --actor human refine edit <brief_id> '{"purpose":"実行可能にする"}'
+tm --actor human refine accept <brief_id>
+tm refine fail <session_id> "runner timeout"
+tm --actor human refine retry <session_id>
+```
+
+`refine ask` / `answer` / `propose` の JSON は配列またはオブジェクトを標準入力 (`-`) からも渡せる。質問は最大 3 ラウンド。回答の `kind` は `answered`（通常回答）、`unknown`（不明）、`delegate`（AI に委任）。
+
+ブリーフの必須判定は「問題または目的」「成果物」「完了条件 1 件以上」「次の一手」。blocking な `open_questions` が残る案は 422 で拒否される。`provenance` は AI の提案元を `inference` / `assumption` / `unresolved` として保持し、人間の編集は `human_edited` になる。
+
+精緻化中 (`mode:refine`) は、通常の `tm ask` / `tm handoff` / `tm done` でレビューを迂回できない。承認後にタスクが `todo` に戻るので、通常の `tm handoff` で実装依頼を開始する。
+
 `note` を取るコマンドは `-` で標準入力から読める。
 
 ## 付箋とファイル
@@ -163,7 +185,7 @@ tm watch
 サーバーの Server-Sent Events を JSON Lines で流す。1 行 1 イベント。
 人間の操作を待ち受けて自動で動くループを書くときに使う。接続直後に `{"type":"hello",...}` が来る。
 
-主な `type`: `task.created` / `task.updated` / `task.deleted` / `note.created` / `note.updated` /
+主な `type`: `task.created` / `task.updated` / `task.deleted` / `refinement.updated` / `note.created` / `note.updated` /
 `criteria.created` / `criteria.updated` / `file.created` / `project.created` など。
 `task.updated` には `action`（`task.ask`・`task.done` など）と `task` 全体が入る。
 
@@ -181,14 +203,16 @@ done
 
 ```
 id title description status waiting_reason assignee priority due
-project_id parent_id tags worker needs_review position version
+project_id parent_id tags agent_mode worker needs_review position version
 created_by created_at updated_at archived_at deleted_at
 note_count file_count sub_total sub_done crit_total crit_done
 last_note   # {body, author, author_name, kind, created_at} または null
 project     # {id, name, color} または null
 ```
 
-`tm --json show <id>` は上記に加えて `criteria` / `notes` / `files` / `subtasks` / `parent` / `history` を含む。
+`tm --json show <id>` は上記に加えて `criteria` / `notes` / `files` / `subtasks` / `parent` / `history` / `refinement` / `brief` を含む。
+
+`refinement` は現在のセッション（`id`, `attempt`, `status`, `questions[]`, `brief`）または失敗・キャンセルされた直近セッション、`brief` は承認済みブリーフ。ブリーフの `content` は `problem`, `purpose`, `background`, `deliverables`, `constraints`, `out_of_scope`, `assumptions`, `open_questions`, `next_action`, `criteria` を持つ。
 
 - `criteria[]`: `{id, task_id, text, position, author, author_name, done, checked_by, checked_by_name, checked_at}`
 - `notes[]`: `{id, task_id, author, author_name, body, kind, created_at, updated_at}` — `kind` は `note` / `question` / `report`
