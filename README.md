@@ -58,9 +58,9 @@ Tailscale Serve で HTTPS を公開すると、サービスワーカーが有効
 | `TM_JEV_TIMEOUT_MS` | `10000` | 自動分類リクエストのタイムアウト（ミリ秒） |
 | `TM_WEBHOOK_URL` | なし | 判断待ちに入った時などに JSON を POST（Slack / Discord の Incoming Webhook 互換） |
 
-自動分類は凡例ダイアログの「自動分類（JEV）」から **オフ / 高確信度のみ自動反映**を選びます。高確信度モードでは新しいタスクの作成時とタイトル・説明・完了条件の更新時に JEV を呼び、既定の閾値 0.85 以上の判定だけを反映します。手入力済みのプロジェクトやタグは変更せず、分類候補にない名前も反映しません。JEV の API キーがない場合は安全側に倒れて何もしません。
+自動分類は画面上部の「JEV自動分類」から **オフ / 高確信度のみ自動反映**を選びます。同じ画面に `config/classification.json` のプロジェクト候補とタグ候補を表示し、未登録プロジェクトは登録できます。候補は新規タスクとタスク詳細の入力補完にも表示されます。高確信度モードでは新しいタスクの作成時とタイトル・説明・完了条件の更新時に JEV を呼び、既定の閾値 0.85 以上の判定だけを反映します。手入力済みのプロジェクトやタグは変更せず、分類候補にない名前も反映しません。JEV の API キーがない場合は安全側に倒れて何もしません。
 
-プロジェクト候補は設定ファイルに書かれていても、既存のプロジェクトに同名のものがなければ作成しません（`create_missing_projects` は `false`）。未作成の候補は再分類結果としてタスク内の「JEVの分類候補」に保存します。タグは設定ファイルの候補からのみ追加されます。凡例の「既存タスクを再分類」またはタスク詳細の「JEVで再分類」から、既存タスクにも適用できます。候補を採用する場合は、プロジェクトを人間が作成・選択してから再分類します。
+プロジェクト候補は設定ファイルに書かれていても、既存のプロジェクトに同名のものがなければ自動作成しません（`create_missing_projects` は `false`）。「JEV自動分類」画面から候補をプロジェクトとして登録できます。未登録のまま再分類した候補はタスク内の「JEVの分類候補」に保存され、タスク詳細の「候補を反映」からプロジェクト作成とタスクへの設定をまとめて実行できます。タグは設定ファイルの候補からのみ追加されます。同画面の「既存タスクを再分類」またはタスク詳細の「JEVで再分類」から、既存タスクにも適用できます。
 
 CLI 側: `TM_URL`（既定 `http://127.0.0.1:3000`）, `TM_ACTOR`（`agent` / `human`）, `TM_ACTOR_NAME`, `TM_TOKEN`, `TM_FORMAT=json`。
 
@@ -105,7 +105,7 @@ tm revert <history_id>                    # 自分の操作を取り消す
 
 ## API
 
-`GET /api/board`, `GET|POST /api/tasks`, `GET|PATCH|DELETE /api/tasks/:id`, `POST /api/tasks/:id/{move,start,ask,handoff,hold,done,approve,archive,unarchive,restore}`,
+`GET /api/board`, `GET|POST /api/tasks`, `GET|PATCH|DELETE /api/tasks/:id`, `POST /api/tasks/:id/{move,start,ask,handoff,hold,done,approve,archive,unarchive,restore}`, `POST /api/tasks/:id/classification/apply`,
 `/api/tasks/:id/{criteria,notes,files,history}`, `POST /api/tasks/:id/classify`, `PATCH|DELETE /api/{criteria,notes,files}/:id`, `GET|POST /api/projects`, `GET|PATCH /api/settings`, `POST /api/classification/reclassify`,
 `GET /api/activity`, `POST /api/history/:id/revert`, `GET /api/export`, `GET /api/events` (SSE)。
 

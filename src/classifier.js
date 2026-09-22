@@ -193,13 +193,13 @@ function predictionFrom(body, candidates) {
   return { project, projectConfidence, tags };
 }
 
-function selectedProject(store, candidate, config) {
+function selectedProject(store, candidate, config, { allowCreate = config.create_missing_projects, actor = AUTO_CLASSIFIER_ACTOR } = {}) {
   if (!candidate) return null;
   const current = store.listProjects().find((project) => project.name === candidate.name);
   if (current) return current;
-  if (!config.create_missing_projects) return null;
+  if (!allowCreate) return null;
   try {
-    return store.createProject({ name: candidate.name, description: candidate.description }, AUTO_CLASSIFIER_ACTOR);
+    return store.createProject({ name: candidate.name, description: candidate.description }, actor);
   } catch (error) {
     if (error?.status !== 409) throw error;
     return store.listProjects().find((project) => project.name === candidate.name) || null;
@@ -301,6 +301,63 @@ export function createTaskClassifier({
     };
   }
 
+  function applySuggestions(taskId, actor) {
+    const current = store.getTask(taskId);
+    const suggestions = current.classification_suggestions || [];
+    if (!suggestions.length) return { task: current, changed: false, applied: [], remaining: [] };
+
+    const candidates = candidatesFor(store, config);
+    const changes = {};
+    const applied = [];
+    const remaining = [];
+    let nextTags = [...current.tags];
+    let nextProjectId = current.project_id;
+    let projectDetail = null;
+
+    for (const suggestion of suggestions) {
+      if (suggestion.kind === 'project') {
+        const candidate = candidates.projects.find((item) => item.key === suggestion.key || item.name === suggestion.name);
+        const project = selectedProject(store, candidate, config, { allowCreate: true, actor });
+        if (!project) {
+          remaining.push(suggestion);
+          continue;
+        }
+        nextProjectId = project.id;
+        projectDetail = { key: suggestion.key, name: project.name, confidence: suggestion.confidence };
+        applied.push(suggestion);
+        continue;
+      }
+      if (suggestion.kind === 'tag') {
+        const candidate = candidates.tags.find((item) => item.key === suggestion.key || item.name === suggestion.name);
+        if (!candidate || (nextTags.length >= MAX_TAGS && !nextTags.includes(candidate.name))) {
+          remaining.push(suggestion);
+          continue;
+        }
+        if (!nextTags.includes(candidate.name)) nextTags.push(candidate.name);
+        applied.push(suggestion);
+        continue;
+      }
+      remaining.push(suggestion);
+    }
+
+    if (nextProjectId !== current.project_id) changes.project_id = nextProjectId;
+    if (JSON.stringify(nextTags) !== JSON.stringify(current.tags)) changes.tags = nextTags;
+    const task = store.updateTask(taskId, changes, actor, {
+      version: current.version,
+      action: 'task.classification_apply',
+      classificationSuggestions: remaining,
+      extraDetail: {
+        classification: {
+          provider: 'jev',
+          applied,
+          remaining,
+          project: projectDetail,
+        },
+      },
+    });
+    return { task, changed: task.version !== current.version, applied, remaining };
+  }
+
   const unsubscribe = store.on((event) => {
     if (event.task_id == null) return;
     if (event.type === 'task.created') void classifyTask(event.task_id);
@@ -310,6 +367,7 @@ export function createTaskClassifier({
 
   return {
     classifyNow: classifyTask,
+    applySuggestions,
     reclassifyAll,
     info() {
       const projects = candidatesFor(store, config).projects;

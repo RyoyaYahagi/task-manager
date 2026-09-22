@@ -61,6 +61,7 @@
     <div class="topbar-actions">
       <button class="btn icon mobile-only" id="filterBtn" title="絞り込み" aria-label="絞り込み"><svg class="ic"><use href="#i-filter"/></svg></button>
       <button class="btn icon" id="activityBtn" title="アクティビティ（全操作ログ）" aria-label="アクティビティ"><svg class="ic"><use href="#i-log"/></svg><span class="btn-label">アクティビティ</span></button>
+      <button class="btn icon" id="classificationBtn" title="JEV自動分類の設定" aria-label="JEV自動分類の設定"><svg class="ic"><use href="#i-tag"/></svg><span class="btn-label">JEV自動分類</span><span class="classification-btn-status" id="classificationStatusBadge"></span></button>
       <button class="btn icon" id="legendBtn" title="凡例" aria-label="凡例"><svg class="ic"><use href="#i-info"/></svg><span class="btn-label">凡例</span></button>
       <button class="btn icon" id="themeBtn" title="テーマ切替" aria-label="テーマ切替"><svg class="ic"><use href="#i-moon"/></svg></button>
       <button class="btn primary" id="addBtn" title="タスクを追加 (n)"><svg class="ic"><use href="#i-plus"/></svg><span class="btn-label">タスクを追加</span></button>
@@ -111,8 +112,8 @@
       <label>担当 <select name="assignee"><option value="both">両方</option><option value="human">人間</option><option value="agent">AI</option></select></label>
       <label>優先度 <select name="priority"><option value="2">中</option><option value="1">低</option><option value="3">高</option><option value="4">緊急</option></select></label>
       <label>期限 <input name="due" type="date"></label>
-      <label>プロジェクト <input name="project" list="projectList" placeholder="なし / 新規名で作成" autocomplete="off"><datalist id="projectList"></datalist></label>
-      <label>タグ <input name="tags" list="tagList" placeholder="カンマ区切り" autocomplete="off"><datalist id="tagList"></datalist></label>
+      <label>プロジェクト <input name="project" list="projectList" placeholder="候補から選択 / 新規名で作成" autocomplete="off"><datalist id="projectList"></datalist></label>
+      <label>タグ <input name="tags" list="tagList" placeholder="候補を入力（カンマ区切り）" autocomplete="off"><datalist id="tagList"></datalist></label>
     </div>
     <label>完了条件（1 行 1 件）<textarea name="criteria" rows="3" placeholder="例:&#10;GET /api/health が 200 を返す&#10;テストが通る"></textarea></label>
     <label class="toggle"><input type="checkbox" name="needs_review"><span>AI の完了報告に承認を必要とする</span></label>
@@ -138,16 +139,6 @@
     </ul>
     <h3>あなたの表示名</h3>
     <label class="muted" style="display:flex;flex-direction:column;gap:4px;font-size:12.5px">付箋や履歴に記録される名前（空なら「human」）<input id="nameInput" class="input" placeholder="例: ryoya" maxlength="60" autocomplete="off"></label>
-    <h3>自動分類（JEV）</h3>
-    <label class="muted" style="display:flex;flex-direction:column;gap:4px;font-size:12.5px">新しいタスクの分類方法
-      <select id="classificationMode" class="select">
-        <option value="off">オフ</option>
-        <option value="high_confidence">高確信度のみ自動反映</option>
-      </select>
-    </label>
-    <p id="classificationInfo" class="muted classification-info"></p>
-    <div id="classificationCandidates" class="classification-candidates"></div>
-    <div class="classification-actions"><button type="button" class="btn" id="reclassifyAll">既存タスクを再分類</button><span class="muted">未作成プロジェクトは候補として返し、自動作成しません。</span></div>
     <h3>使い方</h3>
     <ol class="legend-list">
       <li>タスクを作り、完了条件を書いて「エージェントに依頼」を押す（→ エージェント待ち）。</li>
@@ -155,6 +146,29 @@
       <li>付箋で答えて再度「エージェントに依頼」。AI は条件を満たしたら <code>tm done</code> で完了する。</li>
       <li>間違いは「履歴」タブや「アクティビティ」から元に戻せる。</li>
     </ol>
+    <div class="form-actions"><button class="btn primary" data-close>閉じる</button></div>
+  </div>
+</dialog>
+
+<dialog id="classificationDialog" class="dialog wide">
+  <div class="form">
+    <div class="dialog-head">
+      <div>
+        <h2>JEV自動分類</h2>
+        <p id="classificationStatus" class="classification-status"></p>
+      </div>
+      <button class="btn icon" data-close aria-label="閉じる"><svg class="ic"><use href="#i-x"/></svg></button>
+    </div>
+    <p id="classificationInfo" class="muted classification-info"></p>
+    <label class="muted" style="display:flex;flex-direction:column;gap:4px;font-size:12.5px">新しいタスクの分類方法
+      <select id="classificationMode" class="select">
+        <option value="off">オフ</option>
+        <option value="high_confidence">高確信度のみ自動反映</option>
+      </select>
+    </label>
+    <div id="classificationCandidates" class="classification-candidates"></div>
+    <div class="classification-actions"><button type="button" class="btn" id="reclassifyAll">既存タスクを再分類</button><span class="muted">未登録プロジェクトは自動作成せず、候補として保存します。</span></div>
+    <p class="muted classification-help">候補は <code>config/classification.json</code> から読み込みます。新規タスクとタスク詳細のプロジェクト・タグ入力欄でも候補を選べます。</p>
     <div class="form-actions"><button class="btn primary" data-close>閉じる</button></div>
   </div>
 </dialog>

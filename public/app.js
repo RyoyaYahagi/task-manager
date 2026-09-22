@@ -9,7 +9,7 @@ const PRI_MARK = { 1: '↓', 3: '!', 4: '‼' };
 const ASSIGNEE_LABEL = { human: '人間', agent: 'AI', both: '両方' };
 const ACTION_LABEL = {
   'task.create': 'タスクを作成', 'task.update': '更新', 'task.move': 'レーン移動', 'task.reorder': '並び替え', 'task.start': '作業開始', 'task.ask': '質問して判断待ちへ',
-  'task.handoff': 'エージェントに依頼', 'task.hold': '保留', 'task.done': '完了報告', 'task.approve': '承認して完了', 'task.archive': 'アーカイブ', 'task.unarchive': 'アーカイブ解除', 'task.auto_classify': 'JEV が自動分類',
+  'task.handoff': 'エージェントに依頼', 'task.hold': '保留', 'task.done': '完了報告', 'task.approve': '承認して完了', 'task.archive': 'アーカイブ', 'task.unarchive': 'アーカイブ解除', 'task.auto_classify': 'JEV が自動分類', 'task.classification_apply': 'JEVの分類候補を反映',
   'task.delete': '削除', 'task.restore': '復元', 'criteria.add': '完了条件を追加', 'criteria.edit': '完了条件を編集', 'criteria.check': '完了条件をチェック', 'criteria.delete': '完了条件を削除',
   'note.add': '付箋を追加', 'note.edit': '付箋を編集', 'note.delete': '付箋を削除', 'file.add': 'ファイルを添付', 'file.delete': 'ファイルを削除',
   'project.create': 'プロジェクトを作成', 'project.update': 'プロジェクトを更新', revert: '元に戻す', purge: '完全削除',
@@ -177,7 +177,8 @@ function renderProjectOptions() {
   sel.innerHTML = '<option value="">すべてのプロジェクト</option>' + state.projects.map((p) => `<option value="${p.id}" ${String(p.id) === String(cur) ? 'selected' : ''}>${esc(p.name)}</option>`).join('');
   const configured = (state.meta?.classification?.projects || []).map((p) => p.name);
   const names = [...new Set([...state.projects.map((p) => p.name), ...configured])];
-  $('#projectList').innerHTML = names.map((name) => `<option value="${esc(name)}">`).join('');
+  const list = $('#projectList');
+  if (list) list.innerHTML = names.map((name) => `<option value="${esc(name)}">`).join('');
 }
 function renderTagOptions() {
   const sel = $('#tagFilter');
@@ -185,7 +186,8 @@ function renderTagOptions() {
   sel.innerHTML = '<option value="">タグ: すべて</option>' + state.tags.map((t) => `<option value="${esc(t)}" ${t === cur ? 'selected' : ''}>${esc(t)}</option>`).join('');
   const configured = (state.meta?.classification?.tags || []).map((t) => t.name);
   const names = [...new Set([...state.tags, ...configured])];
-  $('#tagList').innerHTML = names.map((name) => `<option value="${esc(name)}">`).join('');
+  const list = $('#tagList');
+  if (list) list.innerHTML = names.map((name) => `<option value="${esc(name)}">`).join('');
 }
 
 // board events
@@ -311,9 +313,9 @@ function renderDetail() {
   const body = { notes: noteHtml, files: renderFiles(t), html: renderHtmlTab(t), history: renderHistory(t.history, { compact: true }) }[state.ui.tab];
   const suggestions = t.classification_suggestions || [];
   const suggestionHtml = suggestions.length ? `<div class="classification-suggestion-box">
-        <div class="section-title">JEVの分類候補 <span class="count">${suggestions.length}件</span></div>
+        <div class="section-title">JEVの分類候補 <span class="count">${suggestions.length}件</span><button class="btn sm primary right" data-act="apply-classification">候補を反映</button></div>
         <div class="classification-suggestion-list">${suggestions.map((s) => `<div class="classification-suggestion"><span class="tag">${esc(s.kind === 'project' ? 'プロジェクト' : 'タグ')}</span><b>${esc(s.name)}</b><span class="muted">確信度 ${Math.round(Number(s.confidence) * 100)}%</span></div>`).join('')}</div>
-        <p class="muted classification-suggestion-help">未登録プロジェクトは自動作成していません。採用する場合はプロジェクトを作成・選択してから「JEVで再分類」を実行してください。</p>
+        <p class="muted classification-suggestion-help">クリックすると未登録プロジェクトを作成し、候補をこのタスクへ反映します。既存のプロジェクトも候補で置き換わります。</p>
       </div>` : '';
   el.innerHTML = `
     <div class="detail-head">
@@ -336,8 +338,8 @@ function renderDetail() {
         <label class="field"><span>担当</span><select class="select" data-field="assignee">${Object.entries(ASSIGNEE_LABEL).map(([k, v]) => `<option value="${k}" ${k === t.assignee ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
         <label class="field"><span>優先度</span><select class="select" data-field="priority">${[4, 3, 2, 1].map((p) => `<option value="${p}" ${p === t.priority ? 'selected' : ''}>${PRI_LABEL[p]}</option>`).join('')}</select></label>
         <label class="field"><span>期限</span><input class="input" type="date" data-field="due" value="${esc(t.due || '')}"></label>
-        <label class="field"><span>プロジェクト</span><input class="input" list="projectList" data-field="project" value="${esc(t.project?.name || '')}" placeholder="なし"></label>
-        <label class="field"><span>タグ</span><input class="input" list="tagList" data-field="tags" value="${esc(t.tags.join(', '))}" placeholder="カンマ区切り"></label>
+        <label class="field"><span>プロジェクト</span><input class="input" list="projectList" data-field="project" value="${esc(t.project?.name || '')}" placeholder="候補から選択"></label>
+        <label class="field"><span>タグ</span><input class="input" list="tagList" data-field="tags" value="${esc(t.tags.join(', '))}" placeholder="候補を入力（カンマ区切り）"></label>
         <div class="field"><span>作業者</span><div class="static">${t.worker ? `${actorIcon(t.worker === 'human' ? 'human' : 'agent')} ${esc(t.worker)}` : '<span class="muted">—</span>'}</div></div>
         <div class="field"><span>更新</span><div class="static" title="${esc(t.updated_at)}">${fmtDate(t.updated_at)} <span class="muted">(${rel(t.updated_at)})</span></div></div>
         <label class="field-check"><input type="checkbox" data-field="needs_review" ${t.needs_review ? 'checked' : ''}><span>AI の完了報告に人間の承認を必要とする</span></label>
@@ -536,6 +538,15 @@ async function act(name, target) {
         scheduleDetail(); loadBoard();
         break;
       }
+      case 'apply-classification': {
+        const projectSuggestion = (t.classification_suggestions || []).find((suggestion) => suggestion.kind === 'project');
+        if (projectSuggestion && t.project?.name && !confirm(`現在のプロジェクト「${t.project.name}」を「${projectSuggestion.name}」に変更して候補を反映しますか？`)) return;
+        const result = await api('POST', `/api/tasks/${id}/classification/apply`, {});
+        if (result.applied?.length) toast(`候補を反映しました: ${result.applied.map((suggestion) => suggestion.name).join('、')}`, 'ok');
+        else toast('反映できる候補はありません');
+        scheduleDetail(); loadBoard();
+        break;
+      }
       case 'handoff': case 'answer': {
         if (name === 'answer' && !draft) { toast('付箋に回答を書いてから押してください', 'error'); ni?.focus(); return; }
         if (name === 'handoff' && !t.criteria.length && !confirm('完了条件が未設定です。このまま AI に依頼しますか？')) return;
@@ -669,30 +680,67 @@ $$('[data-close]').forEach((b) => { b.onclick = () => b.closest('dialog').close(
 // ---------- legend ----------
 const LANE_HELP = { todo: 'まだ誰も着手していない', in_progress: '人間または AI が作業中', waiting_human: 'AI があなたの回答・確認を待っている', waiting_agent: 'AI に依頼済み。AI の受信箱', on_hold: 'いったん止めている', done: '終わった' };
 function renderClassificationSettings() {
-  const select = $('#classificationMode');
-  if (!select) return;
+  const hasClassificationMeta = Object.prototype.hasOwnProperty.call(state.meta || {}, 'classification');
   const classification = state.meta?.classification || {};
-  select.value = classification.mode || 'off';
+  const mode = classification.mode || 'off';
   const threshold = classification.threshold == null ? null : Math.round(classification.threshold * 100);
+  const status = $('#classificationStatus');
+  const badge = $('#classificationStatusBadge');
+  const button = $('#classificationBtn');
+  const select = $('#classificationMode');
   const info = $('#classificationInfo');
-  if (info) {
-    if (!classification.available) info.textContent = 'JEV の API キーが未設定です。キーを設定するまで分類は実行されません。';
-    else if (classification.mode === 'high_confidence') info.textContent = `新規作成時とタイトル・説明・完了条件の更新時に、確信度 ${threshold ?? 85}% 以上の判定だけ反映します。手動の再分類も実行できます。`;
-    else info.textContent = '現在はオフです。既存タスクや手動更新には自動分類を適用しません。';
-  }
   const candidates = $('#classificationCandidates');
+
+  let statusText = 'サーバー未対応';
+  if (hasClassificationMeta) statusText = classification.available ? (mode === 'high_confidence' ? '自動分類オン' : '自動分類オフ') : 'APIキー未設定';
+  if (status) status.textContent = statusText;
+  if (badge) badge.textContent = hasClassificationMeta ? (classification.available ? (mode === 'high_confidence' ? 'オン' : 'オフ') : 'キー未設定') : '未対応';
+  if (button) button.title = `JEV自動分類の設定（${statusText}）`;
+
+  if (select) {
+    select.value = mode;
+    select.disabled = !hasClassificationMeta;
+  }
+  if (info) {
+    if (!hasClassificationMeta) info.textContent = 'このサーバーは JEV の設定情報を返していません。サーバーを再起動してから再読み込みしてください。';
+    else if (!classification.available) info.textContent = 'JEV の API キーが未設定です。候補は確認できますが、自動分類を実行するにはキーの設定が必要です。';
+    else if (mode === 'high_confidence') info.textContent = `設定ファイルの候補を使い、新規作成時とタイトル・説明・完了条件の更新時に、確信度 ${threshold ?? 85}% 以上の判定だけ反映します。手動の再分類も実行できます。`;
+    else info.textContent = '現在は自動分類オフです。設定ファイルの候補は入力補完と手動の再分類で利用できます。';
+  }
   if (!candidates) return;
-  const projects = (classification.projects || []).map((p) => `${esc(p.name)}${p.available ? '' : '（未作成）'}`).join('、') || '未設定';
-  const tags = (classification.tags || []).map((t) => esc(t.name)).join('、') || '未設定';
-  candidates.innerHTML = `<div><b>プロジェクト候補:</b> ${projects}</div><div><b>タグ候補:</b> ${tags}</div>`;
+  if (!hasClassificationMeta) {
+    candidates.innerHTML = '<p class="muted">候補を取得できません。サーバーを再起動してから再読み込みしてください。</p>';
+    return;
+  }
+
+  const projects = Array.isArray(classification.projects) ? classification.projects : [];
+  const tags = Array.isArray(classification.tags) ? classification.tags : [];
+  const projectRows = projects.length ? projects.map((p) => {
+    const action = p.available
+      ? '<span class="classification-availability ready">登録済み</span>'
+      : classification.create_missing_projects
+        ? '<span class="classification-availability">自動作成</span>'
+        : `<button type="button" class="btn sm" data-register-project data-key="${esc(p.key)}">プロジェクトを登録</button>`;
+    return `<div class="classification-option"><div class="classification-option-main"><b>${esc(p.name)}</b>${p.description ? `<span class="muted">${esc(p.description)}</span>` : ''}</div><div>${action}</div></div>`;
+  }).join('') : '<p class="muted">設定ファイルにプロジェクト候補がありません。</p>';
+  const tagRows = tags.length
+    ? `<div class="classification-tag-list">${tags.map((t) => `<span class="tag classification-tag-option"${t.description ? ` title="${esc(t.description)}"` : ''}>${esc(t.name)}</span>`).join('')}</div>`
+    : '<p class="muted">設定ファイルにタグ候補がありません。</p>';
+  candidates.innerHTML = `<section class="classification-group"><div class="classification-group-head"><b>プロジェクト候補</b><span class="muted">未登録ならここから作成できます</span></div><div class="classification-option-list">${projectRows}</div></section><section class="classification-group"><div class="classification-group-head"><b>タグ候補</b><span class="muted">新規タスク・タスク詳細の入力補完に表示します</span></div>${tagRows}</section>`;
 }
 $('#legendBtn').onclick = () => {
   $('#nameInput').value = LS.get('tm.name', '');
   $('#legendLanes').innerHTML = state.lanes.map((l) => `<div class="legend-lane"><span class="lane-bar" style="background:${esc(l.color)}"></span><b>${esc(l.name)}</b><span class="d">${esc(LANE_HELP[l.id] || '')}</span></div>`).join('');
-  renderClassificationSettings();
+  // Keep a mixed old shell usable until its service-worker cache is replaced.
+  if (!$('#classificationDialog')) renderClassificationSettings();
   $('#legendDialog').showModal();
 };
-$('#classificationMode').addEventListener('change', async (e) => {
+$('#classificationBtn')?.addEventListener('click', () => {
+  renderClassificationSettings();
+  const dialog = $('#classificationDialog');
+  if (dialog && !dialog.open) dialog.showModal();
+});
+$('#classificationMode')?.addEventListener('change', async (e) => {
   const previous = state.meta?.classification?.mode || 'off';
   try {
     const settings = await api('PATCH', '/api/settings', { classification_mode: e.target.value });
@@ -705,7 +753,26 @@ $('#classificationMode').addEventListener('change', async (e) => {
     handleError(err);
   }
 });
-$('#reclassifyAll').addEventListener('click', async () => {
+$('#classificationCandidates')?.addEventListener('click', async (e) => {
+  const button = e.target.closest('[data-register-project]');
+  if (!button) return;
+  const candidate = (state.meta?.classification?.projects || []).find((p) => String(p.key) === String(button.dataset.key));
+  if (!candidate || candidate.available) return;
+  button.disabled = true;
+  button.textContent = '登録中…';
+  try {
+    await api('POST', '/api/projects', { name: candidate.name, description: candidate.description || '' });
+    state.meta = await api('GET', '/api/meta');
+    await loadBoard();
+    renderClassificationSettings();
+    toast(`プロジェクト「${candidate.name}」を登録しました`, 'ok');
+  } catch (err) {
+    button.disabled = false;
+    button.textContent = 'プロジェクトを登録';
+    handleError(err);
+  }
+});
+$('#reclassifyAll')?.addEventListener('click', async () => {
   if (!confirm('未アーカイブの既存タスクをすべて JEV で再分類しますか？')) return;
   try {
     const result = await api('POST', '/api/classification/reclassify', {});
@@ -795,7 +862,7 @@ window.addEventListener('hashchange', () => { const id = Number(location.hash.sl
   registerServiceWorker();
   applyTheme();
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme);
-  try { state.meta = await api('GET', '/api/meta'); } catch (e) { handleError(e); }
+  try { state.meta = await api('GET', '/api/meta'); renderClassificationSettings(); } catch (e) { handleError(e); }
   await loadBoard();
   connect();
   const id = Number(location.hash.slice(1));

@@ -64,6 +64,11 @@ export function createApp({ store, token = null, publicDir = PUBLIC_DIR, webhook
   route('POST', '/api/tasks', (c) => [201, store.createTask(c.body, c.actor)]);
   route('GET', '/api/tasks/:id', (c) => store.getTask(idOf(c.params.id), { includeDeleted: bool(c.query.include_deleted) }));
   route('PATCH', '/api/tasks/:id', (c) => store.updateTask(idOf(c.params.id), c.body, c.actor));
+  route('POST', '/api/tasks/:id/classification/apply', (c) => {
+    requireHuman(c.actor);
+    if (!classifier?.applySuggestions) throw new HttpError(503, 'JEV classifier is not configured', { code: 'classifier_unavailable' });
+    return classifier.applySuggestions(idOf(c.params.id), c.actor);
+  });
   route('POST', '/api/tasks/:id/classify', async (c) => {
     requireHuman(c.actor);
     if (!classifier) throw new HttpError(503, 'JEV classifier is not configured', { code: 'classifier_unavailable' });

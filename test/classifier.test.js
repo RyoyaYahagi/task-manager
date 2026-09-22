@@ -126,4 +126,29 @@ describe('JEV task classifier', () => {
       close();
     }
   });
+
+  test('applies stored project and tag suggestions and records a human action', async () => {
+    const { store, close } = makeStore();
+    const { fetchImpl } = mockFetch({ project: 'development', projectConfidence: 0.97, research: 0.2, implementation: 0.96 });
+    const classifier = createTaskClassifier({ store, config: CONFIG, apiKey: 'test-key', fetchImpl, logger: { warn() {} } });
+    try {
+      const task = store.createTask({ title: '候補を反映する' }, HUMAN);
+      const classified = await classifier.classifyNow(task.id, { force: true, reclassify: true });
+      assert.deepEqual(classified.suggestions.map((suggestion) => suggestion.name), ['開発・実装']);
+      assert.deepEqual(classified.tags.map((tag) => tag.name), ['実装']);
+
+      const applied = classifier.applySuggestions(task.id, HUMAN);
+      assert.equal(applied.changed, true);
+      assert.equal(applied.remaining.length, 0);
+      assert.equal(applied.task.project.name, '開発・実装');
+      assert.deepEqual(applied.task.tags, ['実装']);
+      assert.deepEqual(applied.task.classification_suggestions, []);
+      const appliedTask = store.getTask(task.id);
+      assert.equal(appliedTask.history[0].action, 'task.classification_apply');
+      assert.equal(appliedTask.history[0].actor_name, 'ryoya');
+    } finally {
+      classifier.close();
+      close();
+    }
+  });
 });
