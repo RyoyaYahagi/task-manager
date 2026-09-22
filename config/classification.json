@@ -29,7 +29,7 @@
     }
   ],
   "tags": [
-    { "key": "research", "name": "調査", "description": "情報、文献、仕様、事例を調べる" },
+    { "key": "research", "name": "調査", "description": "情報、文献、仕様、事例、外部サイト、サービス、製品、制度などを調べる" },
     { "key": "implementation", "name": "実装", "description": "コードや設定を変更して成果物を作る" },
     { "key": "verification", "name": "検証", "description": "テスト、再現、比較、測定で確かめる" },
     { "key": "document", "name": "文書", "description": "ノート、報告、説明、応募書類などを書く" },
@@ -38,7 +38,6 @@
     { "key": "bug", "name": "不具合", "description": "失敗、エラー、壊れた挙動の原因を調べて直す" },
     { "key": "review", "name": "レビュー", "description": "成果物や判断を確認し、改善点を洗い出す" },
     { "key": "decision", "name": "意思決定", "description": "選択肢を比較し、方針や採用案を決める" },
-    { "key": "external", "name": "外部調査", "description": "外部サイト、サービス、製品、制度などを確認する" },
     { "key": "infrastructure", "name": "インフラ", "description": "OS、ネットワーク、サーバー、バックアップ、認証に関係する" }
   ]
 }

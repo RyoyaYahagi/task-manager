@@ -25,9 +25,9 @@ function loadServiceWorker(cacheKeys) {
 }
 
 test('service worker removes the previous shell cache after a shell release', async () => {
-  const { listeners, deleted } = loadServiceWorker(['taskboard-shell-v4']);
+  const { listeners, deleted } = loadServiceWorker(['taskboard-shell-v5']);
   let activation;
   listeners.get('activate')({ waitUntil: (promise) => { activation = promise; } });
   await activation;
-  assert.deepEqual(deleted, ['taskboard-shell-v4']);
+  assert.deepEqual(deleted, ['taskboard-shell-v5']);
 });
