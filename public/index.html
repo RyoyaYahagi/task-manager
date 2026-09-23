@@ -61,6 +61,7 @@
     <div class="topbar-actions">
       <button class="btn icon mobile-only" id="filterBtn" title="絞り込み" aria-label="絞り込み"><svg class="ic"><use href="#i-filter"/></svg></button>
       <button class="btn icon" id="activityBtn" title="アクティビティ（全操作ログ）" aria-label="アクティビティ"><svg class="ic"><use href="#i-log"/></svg><span class="btn-label">アクティビティ</span></button>
+      <button class="btn icon" id="refinementSettingsBtn" title="AI深掘りのモデルと推論強度" aria-label="AI深掘りの設定"><svg class="ic"><use href="#i-agent"/></svg><span class="btn-label">AI深掘り設定</span></button>
       <button class="btn icon" id="classificationBtn" title="JEV自動分類の設定" aria-label="JEV自動分類の設定"><svg class="ic"><use href="#i-tag"/></svg><span class="btn-label">JEV自動分類</span><span class="classification-btn-status" id="classificationStatusBadge"></span></button>
       <button class="btn icon" id="legendBtn" title="凡例" aria-label="凡例"><svg class="ic"><use href="#i-info"/></svg><span class="btn-label">凡例</span></button>
       <button class="btn icon" id="themeBtn" title="テーマ切替" aria-label="テーマ切替"><svg class="ic"><use href="#i-moon"/></svg></button>
@@ -171,6 +172,36 @@
     <p class="muted classification-help">候補は <code>config/classification.json</code> から読み込みます。新規タスクとタスク詳細のプロジェクト・タグ入力欄でも候補を選べます。</p>
     <div class="form-actions"><button class="btn primary" data-close>閉じる</button></div>
   </div>
+</dialog>
+
+<dialog id="refinementSettingsDialog" class="dialog">
+  <form id="refinementSettingsForm" class="form">
+    <div class="dialog-head">
+      <h2>AI深掘り設定</h2>
+      <button type="button" class="btn icon" data-close aria-label="閉じる"><svg class="ic"><use href="#i-x"/></svg></button>
+    </div>
+    <p class="muted">ここで保存したモデルと推論強度を、次回以降のAI深掘りで使います。</p>
+    <label>Codex CLI のモデル名
+      <input id="refinementCodexModel" name="model" type="text" class="input" maxlength="100" required autocomplete="off" spellcheck="false" placeholder="例: gpt-5.6-luna">
+    </label>
+    <label>推論強度
+      <select id="refinementReasoningEffort" name="reasoning_effort" class="select">
+        <option value="none">none（推論なし）</option>
+        <option value="minimal">minimal（最小）</option>
+        <option value="low">low（低）</option>
+        <option value="medium">medium（中）</option>
+        <option value="high">high（高）</option>
+        <option value="xhigh">xhigh（非常に高い）</option>
+        <option value="max">max（最大）</option>
+      </select>
+    </label>
+    <p class="muted classification-help">利用できる推論強度はモデルごとに異なります。選んだモデルに対応する値を指定してください。</p>
+    <p id="refinementSettingsStatus" class="classification-status" aria-live="polite"></p>
+    <div class="form-actions">
+      <button type="button" class="btn" data-close>キャンセル</button>
+      <button type="submit" class="btn primary" id="saveRefinementSettings">保存</button>
+    </div>
+  </form>
 </dialog>
 
 <dialog id="activityDialog" class="dialog wide">

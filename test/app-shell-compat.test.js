@@ -182,7 +182,7 @@ test('AI deep dive shows round/question counts and the persisted execution timel
   await new Promise((resolve) => setTimeout(resolve, 25));
 
   const detail = elements.get('detail').innerHTML;
-  assert.match(detail, /ラウンド 1\/3/);
+  assert.match(detail, /ラウンド 1 ・/);
   assert.match(detail, /今回 2問/);
   assert.match(detail, /累計 2問/);
   assert.match(detail, /実行履歴/);

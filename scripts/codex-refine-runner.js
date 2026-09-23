@@ -252,6 +252,28 @@ async function runTm(args) {
   }
 }
 
+export async function loadCodexSettings({
+  fetchImpl = globalThis.fetch,
+  baseUrl = CONFIG.tmUrl,
+  token = process.env.TM_TOKEN || '',
+} = {}) {
+  if (typeof fetchImpl !== 'function') throw new Error('fetch is not available to read AI deep-dive settings');
+  const headers = { 'x-actor': CONFIG.actor, 'x-actor-name': CONFIG.actorName };
+  if (token) headers.authorization = `Bearer ${token}`;
+  const url = `${String(baseUrl).replace(/\/+$/, '')}/api/settings`;
+  const response = await fetchImpl(url, { headers, signal: AbortSignal.timeout(5000) });
+  if (!response.ok) throw new Error(`settings HTTP ${response.status}`);
+  const settings = await response.json();
+  const model = String(settings?.refinement_codex_model || '').trim();
+  const allowedEfforts = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+  return {
+    model: model && model.length <= 100 && !/[\u0000-\u001f\u007f]/.test(model) ? model : CONFIG.codexModel,
+    reasoningEffort: allowedEfforts.includes(settings?.refinement_reasoning_effort)
+      ? settings.refinement_reasoning_effort
+      : CONFIG.reasoningEffort,
+  };
+}
+
 function stripJsonFence(value) {
   const text = String(value || '').trim();
   const match = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
@@ -368,6 +390,32 @@ export function normalizePlan(value) {
   return { action };
 }
 
+function acceptedBriefContext(brief) {
+  if (!brief || typeof brief !== 'object' || Array.isArray(brief)) return null;
+
+  const content =
+    brief.content && typeof brief.content === 'object' && !Array.isArray(brief.content)
+      ? brief.content
+      : brief;
+  const normalizedContent = {};
+  for (const field of BRIEF_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(content, field)) {
+      normalizedContent[field] = content[field];
+    }
+  }
+
+  return {
+    id: brief.id ?? null,
+    revision: brief.revision ?? null,
+    status: brief.status ?? null,
+    content: normalizedContent,
+    provenance:
+      brief.provenance && typeof brief.provenance === 'object'
+        ? brief.provenance
+        : {},
+  };
+}
+
 function taskContext(task) {
   const refinement = task.refinement || {};
   return {
@@ -381,6 +429,7 @@ function taskContext(task) {
       notes: (task.notes || []).map((item) => ({ body: item.body, kind: item.kind })),
       attachments: (task.files || []).map((item) => ({ name: item.name, mime: item.mime, size: item.size })),
     },
+    accepted_brief: acceptedBriefContext(task.brief),
     deep_dive: {
       session_id: refinement.id,
       attempt: refinement.attempt,
@@ -419,15 +468,30 @@ export function buildPlannerPrompt(task) {
 - open_questionsには、質問を終えても残った未解決事項だけを記載してください。proposeではblocking=trueを残してはいけません。
 - 回答はJSONオブジェクトを1つだけ返してください。Markdownや説明文は返さないでください。
 
+高品質な深掘りのプロトコル:
+- 目的は項目を埋めることではなく、実装担当が追加解釈なしで着手でき、完了を確認できるbriefにすることです。今回の修正版のように、正常系だけでなく主要な失敗系まで境界を定義してください。
+- まずTASK_CONTEXTから、事実、既存の人間criteria、未確定事項、矛盾を分けて読み取ってください。内部では「問題・利用者・入力」→「正本となる出力」→「正常系」→「主要な失敗系」→「範囲」→「検証証拠」の設計ツリーを作ってください。
+- TASK_CONTEXT.accepted_briefがある場合、そのcontentは「採用済みだが正しさの保証はない元ブリーフ候補」です。無条件に踏襲せず、現在のcriteria、deep_diveの回答・選択肢、タスク本文とフィールド単位で比較してください。
+- 情報の優先順位は、明示的な最新の人間回答、現在の人間criteria、タスク本文、accepted_brief、AIの推論の順です。ただし現在の人間criteriaを黙って削除・上書きしてはいけません。
+- 設計ツリーの各判断と依存関係を内部で列挙し、前提が確定している判断を現在の分岐点（frontier）としてください。frontierに属する質問は漏れなく同じラウンドで提示し、まだ前提が確定していない後続質問は次のラウンドへ延期してください。最初から画面配置や細かな実装技術を聞かず、利用者・入力境界・正本出力・主要失敗の順に進めてください。
+- action=askを返したラウンドでは、質問だけを提示して停止してください。人間の回答を受け取る前に、提案・採用・実行へ進んではいけません。
+- 質問の回答によって既存criteriaと衝突する場合は、衝突箇所を明示してaction=askに戻してください。維持・置換の選択肢と、それぞれの影響を示し、承認なしに整合したことにしないでください。
+- 元ブリーフが核心の入出力や成功条件を曖昧にしている、失敗時の扱いを欠いている、検証できないcriteriaになっている、または現在の決定と矛盾している場合は不備ありと判定してください。現在の回答だけで解消できるなら、action=proposeで完全な修正版briefを出力してください。差分や要約だけを返してはいけません。
+- propose前に、各deliverableがcriteriaの少なくとも1件に対応しているか、各criteriaに入力・操作・期待結果・主要失敗時の扱い・確認可能な証拠が必要十分な範囲で含まれるか、out_of_scopeとconstraintsがcriteriaと矛盾しないかを自己点検してください。
+- 核心の出力形式、主要な検索・比較・操作対象、または主要な失敗時の扱いが未確定なら、非ブロッキング扱いにせずaction=askを続けてください。細部だけが未確定ならopen_questionsに残して構いません。
+- 修正版のprovenanceは、明示された内容をuser、確定事項からの設計導出をinference、仮置きをassumption、未確定をunresolvedと正確に区別してください。
+
 判断ルール:
 - deep_dive.status が running のときだけ判断してください。
 - grill-me風に、まずTASK_CONTEXTから事実を拾い、タスクを成立させるための「判断の分岐点」を設計ツリーとして整理してください。
-- 今決めないと次の判断に進めない現在の分岐点（frontier）だけを質問してください。後続の細部を先に聞かないでください。
-- 既存質問の回答を反映したあと、設計ツリーを再評価し、未解決のfrontierが残っていれば次のラウンドで続けてください。ラウンド数は最大3、1ラウンドの質問数は最大3件です。3ラウンド目でblockingな分岐が残る場合は、推測で提案せず action=fail としてください。
+- 今決めないと次の判断に進めない現在のfrontierだけを質問し、その時点で質問可能なfrontierを漏れなく同じラウンドに含めてください。後続の細部を先に聞かないでください。
+- 既存質問の回答を反映したあと、設計ツリーを再評価し、未解決のfrontierが残っていれば次のラウンドで続けてください。ラウンド数に上限は設けません。1ラウンドの質問数は最大3件なので、frontierがそれを超える場合は依存関係を壊さない範囲で次のラウンドに分けてください。
 - 問題または目的、成果物、完了条件が足りず、質問で確認する価値がある場合は action=ask。blockingを明示してください。next_actionが未定でも、それだけを理由に質問してはいけません。
+- blockingなfrontierが残る場合は、推測で提案せずaction=askを続けてください。
 - 判断が必要な質問には、互いに重ならない具体的な選択肢を2〜4個用意してください。optionsが空でもよいのは、自由記述が適切な場合だけです。
 - 選択肢を出した質問では、現在の情報から最も妥当な recommended_option を1つ選び、recommendation_reason に理由を書いてください。おすすめはユーザーの代わりに決定したことを意味しません。
-- 必要な情報が揃い、blockingなfrontierが残っていない場合だけ action=propose。briefの任意項目は無理に埋めず、criteriaを1件以上、blocking=trueのopen_questionsは残さないでください。
+- frontierが空になり、設計ツリーの全分岐が「確定」「対象外」「明示的な仮置き」のいずれかになり、暗黙の未決定事項が残っていない場合だけ action=propose。briefの任意項目は無理に埋めず、criteriaを1件以上、blocking=trueのopen_questionsは残さないでください。
+- action=proposeは実行や正式採用ではなく、人間が確認・編集・acceptするためのドラフト提出です。人間の確認前にタスクを完了扱いにしたり、実装へ進んだりしてはいけません。
 - proposeでは、brief.provenanceに各項目の根拠を記録してください。元タスクまたはユーザー回答で確認できたものは user、AIが導いたものは inference、作業上の仮置きは assumption、未確定のものは unresolved とします。inference / assumption / unresolved を user と偽らないでください。
 - 判断できない場合は action=fail とし、理由を短く書いてください。
 
@@ -441,12 +505,14 @@ ${context}`;
 }
 
 async function runCodex(task) {
+  const settings = await loadCodexSettings();
+  log(`task=${task.id} Codex model=${settings.model} reasoning_effort=${settings.reasoningEffort}`);
   const args = [
     'exec', '--json', '--ephemeral', '--sandbox', 'read-only',
     '--output-schema', OUTPUT_SCHEMA,
     '-c', 'approval_policy="never"',
-    '-c', `model_reasoning_effort="${CONFIG.reasoningEffort}"`,
-    '-C', ROOT, '-m', CONFIG.codexModel,
+    '-c', `model_reasoning_effort="${settings.reasoningEffort}"`,
+    '-C', ROOT, '-m', settings.model,
     buildPlannerPrompt(task),
   ];
   const result = await runCommand(CONFIG.codexBin, args, { timeoutMs: CONFIG.codexTimeoutMs });
@@ -455,9 +521,9 @@ async function runCodex(task) {
     plan,
     usage_record: buildUsageRecord({
       provider: 'codex',
-      model: CONFIG.codexModel,
+      model: settings.model,
       usage: parseCodexUsage(result.stdout),
-      metadata: { purpose: 'refinement_planner', reasoning_effort: CONFIG.reasoningEffort },
+      metadata: { purpose: 'refinement_planner', reasoning_effort: settings.reasoningEffort },
     }),
   };
 }
@@ -604,7 +670,7 @@ export async function main() {
     if (!controller.signal.aborted) log(`SSE subscriber stopped: ${errorMessage(error)}`);
   });
 
-  log(`started url=${CONFIG.tmUrl} actor=${CONFIG.actorName} model=${CONFIG.codexModel} jev_refine=${defaultRefinementJudge.info().available ? 'on' : 'off'} reconcile_ms=${CONFIG.reconcileMs}`);
+  log(`started url=${CONFIG.tmUrl} actor=${CONFIG.actorName} Codex model=settings jev_refine=${defaultRefinementJudge.info().available ? 'on' : 'off'} reconcile_ms=${CONFIG.reconcileMs}`);
   try {
     while (!stopping) {
       await wakeGate.wait();

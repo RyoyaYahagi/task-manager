@@ -106,6 +106,27 @@ describe('task refinement', () => {
       assert.equal(store.getRefinement(requested.refinement.id).status, 'draft');
     });
 
+    test('continues the same refinement session beyond three question rounds', () => {
+      const task = store.createTask({ title: '長い設計ツリー' }, HUMAN);
+      const requested = store.requestRefinement(task.id, HUMAN, { version: task.version });
+      let currentTask = store.startTask(task.id, AGENT, { version: requested.task.version });
+
+      for (let round = 1; round <= 4; round += 1) {
+        const asked = store.submitRefinementQuestions(requested.refinement.id, [
+          { question: `判断分岐 ${round}` },
+        ], AGENT, { version: currentTask.version });
+        const question = asked.refinement.questions.at(-1);
+        assert.equal(question.round_no, round);
+
+        const answered = store.answerRefinement(requested.refinement.id, [
+          { id: question.id, kind: 'answered', answer: `回答 ${round}` },
+        ], HUMAN, { version: asked.task.version });
+        currentTask = answered.task;
+      }
+
+      assert.equal(store.getRefinement(requested.refinement.id).questions.at(-1).round_no, 4);
+    });
+
     test('failure can be retried and export includes structured records', () => {
       const task = store.createTask({ title: '再試行対象' }, HUMAN);
       const requested = store.requestRefinement(task.id, HUMAN, { version: task.version });

@@ -160,12 +160,60 @@ test('buildPlannerPrompt marks board content as untrusted data', () => {
   assert.match(prompt, /選択肢/);
   assert.match(prompt, /おすすめ/);
   assert.match(prompt, /判断の分岐点/);
-  assert.match(prompt, /最大3、1ラウンドの質問数は最大3件/);
+  assert.match(prompt, /ラウンド数に上限は設けません/);
+  assert.match(prompt, /frontierに属する質問は漏れなく同じラウンド/);
+  assert.match(prompt, /action=askを返したラウンドでは/);
   assert.match(prompt, /provenance/);
-  assert.match(prompt, /推測で提案せず/);
+  assert.match(prompt, /推測で提案せずaction=ask/);
   assert.match(prompt, /next_actionが未定でも/);
   assert.match(prompt, /空配列・空文字のまま/);
   assert.match(prompt, /"title": "タイトル"/);
+});
+
+test('buildPlannerPrompt applies the high-quality deep-dive protocol', () => {
+  const prompt = buildPlannerPrompt({
+    id: 42,
+    title: '採用済みブリーフの見直し',
+    description: '元ブリーフと後から決まった内容を比較する',
+    project: null,
+    tags: [],
+    criteria: [{ text: '成功条件が確認できる', done: false }],
+    notes: [],
+    files: [],
+    brief: {
+      id: 7,
+      revision: 2,
+      status: 'accepted',
+      content: {
+        problem: '元の問題',
+        purpose: '元の目的',
+        deliverables: ['元の成果物'],
+        constraints: [],
+        out_of_scope: [],
+        assumptions: [],
+        open_questions: [],
+        next_action: '元の次の行動',
+        criteria: ['元の条件'],
+      },
+      provenance: { purpose: 'user' },
+    },
+    refinement: {
+      id: 9,
+      attempt: 1,
+      status: 'running',
+      questions: [],
+    },
+  });
+
+  assert.match(prompt, /accepted_brief/);
+  assert.match(prompt, /高品質な深掘りのプロトコル/);
+  assert.match(prompt, /正常系だけでなく主要な失敗系/);
+  assert.match(prompt, /現在のfrontierだけを質問/);
+  assert.match(prompt, /propose前に/);
+  assert.match(prompt, /承認なしに整合したことにしない/);
+  assert.match(prompt, /frontierが空になり/);
+  assert.match(prompt, /人間が確認・編集・acceptするためのドラフト/);
+  assert.match(prompt, /元の問題/);
 });
 
 test('parseSseEventBlock parses the event name and JSON data', () => {

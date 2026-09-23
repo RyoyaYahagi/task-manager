@@ -27,7 +27,15 @@ export const DESC_MAX = 20000;
 export const FILE_MAX = 20 * 1024 * 1024;
 export const PRIORITIES = { 1: '低', 2: '中', 3: '高', 4: '緊急' };
 export const CLASSIFICATION_MODES = ['off', 'high_confidence'];
-export const DEFAULT_SETTINGS = { classification_mode: 'off' };
+export const CODEX_REASONING_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+export const DEFAULT_SETTINGS = {
+  classification_mode: 'off',
+  refinement_codex_model: 'gpt-5.6-luna',
+  refinement_reasoning_effort: 'max',
+};
+function validCodexModel(value) {
+  return typeof value === 'string' && value.trim().length > 0 && value.trim().length <= 100 && !/[\u0000-\u001f\u007f]/.test(value);
+}
 // Content types that say nothing about the file itself; the file name is more trustworthy.
 const GENERIC_TYPES = new Set(['application/octet-stream', 'binary/octet-stream', 'application/x-www-form-urlencoded', 'multipart/form-data']);
 const PROJECT_COLORS = ['#3b82f6', '#8b5cf6', '#ec4899', '#f97316', '#14b8a6', '#eab308', '#22c55e', '#06b6d4'];
@@ -321,7 +329,10 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
   const all = (sql, ...p) => q(sql).all(...p);
   const run = (sql, ...p) => q(sql).run(...p);
 
-  for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
+  const initialSettings = { ...DEFAULT_SETTINGS };
+  if (validCodexModel(process.env.CODEX_MODEL?.trim())) initialSettings.refinement_codex_model = process.env.CODEX_MODEL.trim();
+  if (CODEX_REASONING_EFFORTS.includes(process.env.CODEX_REASONING_EFFORT)) initialSettings.refinement_reasoning_effort = process.env.CODEX_REASONING_EFFORT;
+  for (const [key, value] of Object.entries(initialSettings)) {
     run('INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?,?,?)', key, value, now());
   }
 
@@ -441,6 +452,8 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
     const settings = { ...DEFAULT_SETTINGS };
     for (const row of all('SELECT key, value FROM settings')) {
       if (row.key === 'classification_mode' && CLASSIFICATION_MODES.includes(row.value)) settings[row.key] = row.value;
+      if (row.key === 'refinement_codex_model' && validCodexModel(row.value)) settings[row.key] = row.value.trim();
+      if (row.key === 'refinement_reasoning_effort' && CODEX_REASONING_EFFORTS.includes(row.value)) settings[row.key] = row.value;
     }
     return settings;
   }
@@ -449,12 +462,27 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
     actor = normalizeActor(actor);
     if (actor.kind !== 'human') throw new PolicyError('only humans can change settings');
     return mutate(() => {
-      if (patch?.classification_mode === undefined) return getSettings();
-      const mode = String(patch.classification_mode);
-      if (!CLASSIFICATION_MODES.includes(mode)) throw new StoreError(400, `classification_mode must be ${CLASSIFICATION_MODES.join('|')}`);
+      const changes = {};
+      if (patch?.classification_mode !== undefined) {
+        const mode = String(patch.classification_mode);
+        if (!CLASSIFICATION_MODES.includes(mode)) throw new StoreError(400, `classification_mode must be ${CLASSIFICATION_MODES.join('|')}`);
+        changes.classification_mode = mode;
+      }
+      if (patch?.refinement_codex_model !== undefined) {
+        const model = String(patch.refinement_codex_model ?? '').trim();
+        if (!validCodexModel(model)) throw new StoreError(400, 'refinement_codex_model must be a non-empty model name up to 100 characters');
+        changes.refinement_codex_model = model;
+      }
+      if (patch?.refinement_reasoning_effort !== undefined) {
+        const effort = String(patch.refinement_reasoning_effort);
+        if (!CODEX_REASONING_EFFORTS.includes(effort)) throw new StoreError(400, `refinement_reasoning_effort must be ${CODEX_REASONING_EFFORTS.join('|')}`);
+        changes.refinement_reasoning_effort = effort;
+      }
+      if (!Object.keys(changes).length) return getSettings();
       const before = getSettings();
-      if (before.classification_mode === mode) return before;
-      run('UPDATE settings SET value = ?, updated_at = ? WHERE key = ?', mode, now(), 'classification_mode');
+      const changed = Object.entries(changes).filter(([key, value]) => before[key] !== value);
+      if (!changed.length) return before;
+      for (const [key, value] of changed) run('UPDATE settings SET value = ?, updated_at = ? WHERE key = ?', value, now(), key);
       const settings = getSettings();
       emit('settings.updated', { settings });
       return settings;
@@ -965,7 +993,6 @@ export function createStore({ file = ':memory:', lanes, policy = {}, filesDir = 
       const task = getTaskRow(session.task_id);
       assertVersion(task, version ?? session.base_task_version);
       const previousRound = num(get('SELECT COALESCE(MAX(round_no), 0) AS m FROM refinement_questions WHERE session_id = ?', sessionId).m);
-      if (previousRound >= 3) throw new StoreError(422, 'refinement question rounds are limited to 3', { code: 'refinement_round_limit' });
       const items = domainValue(() => normalizeQuestionItems(questions));
       const round = previousRound + 1;
       const ts = now();

@@ -18,7 +18,7 @@ const ACTION_LABEL = {
 const FIELD_LABEL = { title: 'タイトル', description: '説明', status: '状態', waiting_reason: '理由', assignee: '担当', priority: '優先度', due: '期限', project_id: 'プロジェクト', parent_id: '親タスク', tags: 'タグ', classification_suggestions: '分類候補', agent_mode: 'AIモード', worker: '作業者', needs_review: '要承認', position: '位置', archived_at: 'アーカイブ', deleted_at: '削除', body: '本文', text: '内容', done: 'チェック', kind: '種別', name: '名前' };
 
 const state = {
-  meta: null, lanes: [], board: null, tasks: [], projects: [], tags: [],
+  meta: null, settings: null, lanes: [], board: null, tasks: [], projects: [], tags: [],
   filter: { q: '', project: LS.get('tm.project', ''), assignee: '', priority: '', tag: '', overdue: false, archived: false },
   ui: { showTags: LS.get('tm.showTags', false), hideSubtasks: LS.get('tm.hideSubtasks', window.innerWidth < 768), collapsed: LS.get('tm.collapsed', null), tab: 'notes', theme: LS.get('tm.theme', 'auto') },
   selectedId: null, task: null, noteDraft: '', editing: null, htmlFile: null, token: LS.get('tm.token', ''),
@@ -393,7 +393,7 @@ function renderRefinementProgress(status, session = null) {
   const questions = session?.questions || [];
   const round = Math.max(...questions.map((q) => Number(q.round_no) || 0), 0);
   const currentRoundCount = round ? questions.filter((q) => Number(q.round_no) === round).length : 0;
-  const roundLabel = round ? ` ・ ラウンド ${round}/3 ・ 今回 ${currentRoundCount}問 ・ 累計 ${questions.length}問` : '';
+  const roundLabel = round ? ` ・ ラウンド ${round} ・ 今回 ${currentRoundCount}問 ・ 累計 ${questions.length}問` : '';
   if (terminal) {
     return `<div class="refinement-progress ${meta.tone}" data-refinement-status="${esc(status)}">
       <div class="refinement-progress-head"><strong>現在の状態</strong><span>${esc(meta.label)}</span></div>
@@ -1075,6 +1075,49 @@ function renderClassificationSettings() {
     : '<p class="muted">設定ファイルにタグ候補がありません。</p>';
   candidates.innerHTML = `<section class="classification-group"><div class="classification-group-head"><b>プロジェクト候補</b><span class="muted">未登録ならここから作成できます</span></div><div class="classification-option-list">${projectRows}</div></section><section class="classification-group"><div class="classification-group-head"><b>タグ候補</b><span class="muted">新規タスク・タスク詳細の入力補完に表示します</span></div>${tagRows}</section>`;
 }
+function renderRefinementSettings() {
+  const settings = state.settings || {};
+  const model = $('#refinementCodexModel');
+  const effort = $('#refinementReasoningEffort');
+  if (model) model.value = settings.refinement_codex_model || 'gpt-5.6-luna';
+  if (effort) effort.value = settings.refinement_reasoning_effort || 'max';
+}
+$('#refinementSettingsBtn')?.addEventListener('click', async () => {
+  const button = $('#refinementSettingsBtn');
+  button.disabled = true;
+  try {
+    state.settings = await api('GET', '/api/settings');
+    renderRefinementSettings();
+    $('#refinementSettingsForm').dataset.dirty = 'false';
+    $('#refinementSettingsStatus').textContent = '';
+    $('#refinementSettingsDialog').showModal();
+  } catch (err) { handleError(err); }
+  finally { button.disabled = false; }
+});
+$('#refinementSettingsForm')?.addEventListener('change', (e) => {
+  if (e.target.matches('#refinementCodexModel, #refinementReasoningEffort')) e.currentTarget.dataset.dirty = 'true';
+});
+$('#refinementSettingsForm')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const form = e.currentTarget;
+  const save = $('#saveRefinementSettings');
+  const status = $('#refinementSettingsStatus');
+  save.disabled = true;
+  status.textContent = '保存しています…';
+  try {
+    state.settings = await api('PATCH', '/api/settings', {
+      refinement_codex_model: $('#refinementCodexModel').value.trim(),
+      refinement_reasoning_effort: $('#refinementReasoningEffort').value,
+    });
+    renderRefinementSettings();
+    form.dataset.dirty = 'false';
+    status.textContent = '保存しました。次回以降のAI深掘りで使います。';
+    toast('AI深掘りの設定を保存しました', 'ok');
+  } catch (err) {
+    status.textContent = '設定を保存できませんでした。';
+    handleError(err);
+  } finally { save.disabled = false; }
+});
 $('#legendBtn').onclick = () => {
   $('#nameInput').value = LS.get('tm.name', '');
   $('#legendLanes').innerHTML = state.lanes.map((l) => `<div class="legend-lane"><span class="lane-bar" style="background:${esc(l.color)}"></span><b>${esc(l.name)}</b><span class="d">${esc(LANE_HELP[l.id] || '')}</span></div>`).join('');
@@ -1166,9 +1209,14 @@ function connect() {
     let ev = {};
     try { ev = JSON.parse(e.data); } catch { /* ignore */ }
     if (ev.type === 'settings.updated' && ev.settings) {
+      state.settings = ev.settings;
       state.meta = state.meta || {};
       state.meta.classification = { ...(state.meta.classification || {}), mode: ev.settings.classification_mode };
       renderClassificationSettings();
+      const form = $('#refinementSettingsForm');
+      if ($('#refinementSettingsDialog')?.open && form.dataset.dirty !== 'true') {
+        renderRefinementSettings();
+      }
     }
     scheduleBoard();
     if (state.selectedId && (ev.task_id === state.selectedId || ev.task?.parent_id === state.selectedId || state.task?.parent_id === ev.task_id)) scheduleDetail();

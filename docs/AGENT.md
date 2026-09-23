@@ -38,7 +38,7 @@ A human and I share a kanban board. Lanes mean **who holds the ball**:
 
 Use this flow when the title / description does not yet make the problem, deliverable, or completion conditions clear. It is separate from the ordinary execution handoff.
 
-The external runner for this flow is Codex CLI with the current setting `gpt-5.6-luna`, reasoning effort `max`. This repository does not spawn Codex CLI; the runner uses `tm` to read and update the board.
+The external runner for this flow is Codex CLI. Its model and reasoning effort are saved in the task-manager settings and can be changed from the "AI深掘り設定" screen; the defaults are `gpt-5.6-luna` and `max`. This repository does not spawn Codex CLI from the server; the external runner reads the settings and uses `tm` to read and update the board.
 
 1. A human starts the session with `tm --actor human refine request <id>`.
 2. Run `tm inbox`, then `tm start <id>` as usual. The task will have `mode:refine`.

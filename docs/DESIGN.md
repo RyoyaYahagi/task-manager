@@ -178,7 +178,7 @@ AI: refine propose
   → waiting_agent, agent_mode=execute（通常の実装フロー）
 ```
 
-AI深掘りの質問は blocking / non-blocking を持ち、最大 3 ラウンド・1 ラウンド最大 3 問。AI は grill-me 風に設計ツリーを再評価し、未解決の判断分岐（frontier）が残る限り次のラウンドへ進む。ラウンド数を満たすための質問は追加しない。3 ラウンド目でも blocking な分岐が残る場合は、推測でブリーフを作らず失敗として人間に戻す。判断質問には `options`、`recommended_option`、`recommendation_reason` を付ける。画面にはクリック式の選択肢と「その他（自由回答）」を表示し、人間は「回答」「不明」「AI に委任」を明示する。選択した値は `selected_option` として保存し、「その他」の場合は自由回答を必須にする。AI は情報を発明せず、元タスク・ユーザー回答で確認できた項目だけを確定扱いにし、推定・仮定・未解決を項目ごとの `provenance` に残す。任意のブリーフ項目は空欄でもよい。
+AI深掘りの質問は blocking / non-blocking を持ち、1 ラウンド最大 3 問。AI は grill-me 風に設計ツリーの依存関係を再評価し、現在質問できる frontier を同じラウンドに提示する。frontier が残る限り、ラウンド数の上限なく次のラウンドへ進む。frontier が 3 問を超える場合は、依存関係を壊さない範囲で次のラウンドに分ける。質問を出したラウンドでは人間の回答を待ち、回答前に提案・採用・実行へ進まない。frontier が空になり、全分岐が確定・対象外・明示的な仮置きのいずれかになった場合だけ、AI は人間確認用のドラフトを提出する。判断質問には `options`、`recommended_option`、`recommendation_reason` を付ける。画面にはクリック式の選択肢と「その他（自由回答）」を表示し、人間は「回答」「不明」「AI に委任」を明示する。選択した値は `selected_option` として保存し、「その他」の場合は自由回答を必須にする。AI は情報を発明せず、元タスク・ユーザー回答で確認できた項目だけを確定扱いにし、推定・仮定・未解決を項目ごとの `provenance` に残す。任意のブリーフ項目は空欄でもよい。
 
 ブリーフは、必須項目と必要時だけ記載する項目を分ける。必須項目は `problem` または `purpose` のどちらか一つ、`deliverables`、`criteria`。`background`、`constraints`、`out_of_scope`、`assumptions`、`open_questions`、`next_action` は、タスクに根拠や必要性がある場合だけ記載する。`next_action` は実行開始の補助情報であり、承認の最低条件にはしない。`open_questions` は深掘り後にも残った未解決事項だけを示し、blocking な項目は承認できない。non-blocking の未解決事項は警告として残せる。保存時は既存データとの互換性のため従来の項目名を維持する。
 
@@ -222,7 +222,13 @@ AI の「完了」を曖昧にしないため、タスクごとに **完了条�
 - ヘッダに **プロジェクト切替**（すべて / 個別）。ボードは 1 枚で、フィルタで絞る。
 - CLI: `tm projects`, `tm project add <name> [--color]`, タスクには `--project <name>` で指定。
 
-### 5.6 JEV 自動分類
+### 5.6 AI深掘りの Codex CLI 設定
+
+- `settings.refinement_codex_model` にモデル名を保存する。モデル名は画面から入力できる。
+- `settings.refinement_reasoning_effort` に推論強度を保存する。画面では `none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max` を選べる。
+- 外部ランナーは Codex CLI の起動ごとに `/api/settings` を読み、モデル名と推論強度を適用する。初期値は `gpt-5.6-luna` と `max`。
+
+### 5.7 JEV 自動分類
 
 - `config/classification.json` に、JEV が選べるプロジェクト候補・タグ候補・閾値を定義する。モデルが自由な名前を返しても、候補キーに一致しない値は反映しない。
 - JEV の HTTP 呼び出しは `JEV_GATEWAY_URL`（既定 `http://127.0.0.1:4789/v1/systemone`）へ送り、必要な場合だけ `JEV_GATEWAY_TOKEN` をローカルアクセス用の Bearer トークンとして付ける。TypeSafe の上流 API キーは Gateway が管理する。
@@ -307,7 +313,7 @@ AI の「完了」を曖昧にしないため、タスクごとに **完了条�
 | GET / DELETE | `/api/files/:id` | ダウンロード（`?inline=1` で HTML プレビュー用）/ 削除 |
 | GET / POST | `/api/projects` | プロジェクト一覧 / 作成 |
 | PATCH / DELETE | `/api/projects/:id` | 更新 / アーカイブ |
-| GET / PATCH | `/api/settings` | 自動分類モードの取得 / 更新 |
+| GET / PATCH | `/api/settings` | 自動分類とAI深掘りの設定を取得 / 更新 |
 | POST | `/api/tasks/:id/classify` | 人間が指定したタスクを JEV で再分類 |
 | POST | `/api/classification/reclassify` | 既存タスクを一括再分類 |
 | GET | `/api/tasks/:id/history` | タスク履歴 |

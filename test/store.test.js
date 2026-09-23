@@ -32,8 +32,16 @@ describe('store', () => {
   });
 
   test('classification mode defaults off, persists in the store, and emits an event', () => {
-    assert.deepEqual(store.getSettings(), { classification_mode: 'off' });
-    assert.deepEqual(store.updateSettings({ classification_mode: 'high_confidence' }, HUMAN), { classification_mode: 'high_confidence' });
+    assert.deepEqual(store.getSettings(), {
+      classification_mode: 'off',
+      refinement_codex_model: 'gpt-5.6-luna',
+      refinement_reasoning_effort: 'max',
+    });
+    assert.deepEqual(store.updateSettings({ classification_mode: 'high_confidence' }, HUMAN), {
+      classification_mode: 'high_confidence',
+      refinement_codex_model: 'gpt-5.6-luna',
+      refinement_reasoning_effort: 'max',
+    });
     assert.equal(store.getSettings().classification_mode, 'high_confidence');
     assert.ok(events.some((e) => e.type === 'settings.updated' && e.settings.classification_mode === 'high_confidence'));
     assert.throws(() => store.updateSettings({ classification_mode: 'always' }, HUMAN), /classification_mode/);
